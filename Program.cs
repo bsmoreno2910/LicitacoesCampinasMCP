@@ -15,15 +15,8 @@ class Program
     static async Task Main(string[] args)
     {
         var runAsApi = Environment.GetEnvironmentVariable("RUN_AS_API") == "true" || args.Contains("--api");
-
-        if (runAsApi)
-        {
-            await RunAsHttpApi(args);
-        }
-        else
-        {
-            await RunAsMcpServer(args);
-        }
+        if (runAsApi) await RunAsHttpApi(args);
+        else await RunAsMcpServer(args);
     }
 
     static async Task RunAsMcpServer(string[] args)
@@ -32,8 +25,7 @@ class Program
         builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
         builder.Services.AddSingleton<PlaywrightService>();
         builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = "licitacoes-campinas", Version = "1.0.0" })
-            .WithStdioServerTransport()
-            .WithToolsFromAssembly();
+            .WithStdioServerTransport().WithToolsFromAssembly();
         await builder.Build().RunAsync();
     }
 
@@ -48,21 +40,15 @@ class Program
         app.UseSwaggerUI();
 
         app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
-
-        app.MapGet("/api/edital/{id}", async (string id, PlaywrightService ps) =>
-        {
+        app.MapGet("/api/edital/{id}", async (string id, PlaywrightService ps) => {
             try { return Results.Content(await LicitacoesTools.BuscarEdital(ps, id), "application/json"); }
             catch (Exception ex) { return Results.Problem(ex.Message); }
         });
-
-        app.MapGet("/api/licitacoes", async (int? pagina, int? itens, PlaywrightService ps) =>
-        {
+        app.MapGet("/api/licitacoes", async (int? pagina, int? itens, PlaywrightService ps) => {
             try { return Results.Content(await LicitacoesTools.BuscarListaLicitacoes(ps, pagina ?? 1, itens ?? 100), "application/json"); }
             catch (Exception ex) { return Results.Problem(ex.Message); }
         });
-
-        app.MapPost("/api/edital/{id}/arquivo", async (string id, ArquivoRequest req, PlaywrightService ps) =>
-        {
+        app.MapPost("/api/edital/{id}/arquivo", async (string id, ArquivoRequest req, PlaywrightService ps) => {
             try { return Results.Content(await LicitacoesTools.BaixarArquivoEdital(ps, id, req.NomeArquivo, req.PastaDestino ?? "/tmp/downloads"), "application/json"); }
             catch (Exception ex) { return Results.Problem(ex.Message); }
         });
@@ -204,16 +190,14 @@ public static class LicitacoesTools
             {
                 await page.GotoAsync("https://campinas.sp.gov.br/licitacoes/home", new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 60000 });
 
-                // Aguarda loading desaparecer e tabela carregar
                 try
                 {
                     await page.WaitForFunctionAsync("() => !document.body.innerText.includes('Aguarde carregando')", new PageWaitForFunctionOptions { Timeout = 60000 });
-                    await page.WaitForFunctionAsync("() => document.querySelectorAll('table tbody tr').length > 0", new PageWaitForFunctionOptions { Timeout = 30000 });
-                    await page.WaitForTimeoutAsync(2000);
+                    await page.WaitForFunctionAsync("() => document.querySelectorAll('table tbody tr').length > 0 || document.body.innerText.includes('Nenhum registro')", new PageWaitForFunctionOptions { Timeout = 30000 });
+                    await page.WaitForTimeoutAsync(3000);
                 }
                 catch (Exception ex) { return JsonSerializer.Serialize(new { erro = $"Timeout: {ex.Message}" }); }
 
-                // Muda itens por página
                 if (itens_por_pagina != 10)
                 {
                     try
@@ -231,7 +215,6 @@ public static class LicitacoesTools
                     catch { }
                 }
 
-                // Navega páginas
                 for (int p = 1; p < pagina; p++)
                 {
                     try
@@ -269,11 +252,11 @@ public static class LicitacoesTools
                 await page.WaitForSelectorAsync("text=Processo:", new PageWaitForSelectorOptions { Timeout = 45000 });
                 await page.WaitForTimeoutAsync(2000);
 
-                // Clica aba Arquivos
-                var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Arquivos'), button:has-text('Arquivos')");
+                // Clica na aba Arquivos usando o seletor correto
+                var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Arquivos')");
                 if (aba != null) { await aba.ClickAsync(); await page.WaitForTimeoutAsync(3000); }
 
-                var btn = await page.QuerySelectorAsync($"tr:has-text('{nome_arquivo}') button, tr:has-text('{nome_arquivo}') a");
+                var btn = await page.QuerySelectorAsync($"tr:has-text('{nome_arquivo}') button");
                 if (btn != null)
                 {
                     var dl = await page.RunAndWaitForDownloadAsync(async () => await btn.ClickAsync());
@@ -311,10 +294,14 @@ public static class LicitacoesTools
         lic.DataFimPropostas = await ExtrairCampo(page, "Data fim de recebimento propostas");
         lic.UltimaAlteracao = await ExtrairCampo(page, "Última alteração");
 
-        lic.ValorEstimado = ConverterValor(await ExtrairValor(page, "Valor total estimado"));
-        lic.ValorHomologado = ConverterValor(await ExtrairValor(page, "Valor total homologado"));
+        // Extrai valores usando seletor específico dos cards
+        lic.ValorEstimado = await ExtrairValorCard(page, "Valor total estimado");
+        lic.ValorHomologado = await ExtrairValorCard(page, "Valor total homologado");
 
+        // Extrai arquivos
         lic.Arquivos = await ExtrairArquivos(page);
+        
+        // Extrai itens
         lic.Itens = await ExtrairItens(page);
 
         return lic;
@@ -347,19 +334,21 @@ public static class LicitacoesTools
         catch { return null; }
     }
 
-    private static async Task<string?> ExtrairValor(IPage page, string label)
+    private static async Task<decimal> ExtrairValorCard(IPage page, string label)
     {
         try
         {
+            // Busca o valor dentro do card específico
             var script = $@"(() => {{
                 const text = document.body.innerText;
-                const regex = new RegExp('{label}[^R]*R\\$\\s*([\\d.,]+)', 'i');
+                const regex = new RegExp('{label}[\\s\\S]*?R\\$\\s*([\\d.,]+)', 'i');
                 const match = text.match(regex);
                 return match ? match[1].trim() : null;
             }})()";
-            return await page.EvaluateAsync<string?>(script);
+            var valorStr = await page.EvaluateAsync<string?>(script);
+            return ConverterValor(valorStr);
         }
-        catch { return null; }
+        catch { return 0; }
     }
 
     private static decimal ConverterValor(string? v)
@@ -373,25 +362,43 @@ public static class LicitacoesTools
     {
         try
         {
-            var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Arquivos'), button:has-text('Arquivos')");
-            if (aba != null) { await aba.ClickAsync(); await page.WaitForTimeoutAsync(3000); }
+            // Clica na aba Arquivos usando o seletor correto do Angular Material
+            var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Arquivos')");
+            if (aba != null) 
+            { 
+                await aba.ClickAsync(); 
+                await page.WaitForTimeoutAsync(3000);
+                
+                // Aguarda a tabela de arquivos aparecer
+                try { await page.WaitForSelectorAsync("table", new PageWaitForSelectorOptions { Timeout = 5000 }); }
+                catch { }
+            }
 
+            // Extrai arquivos da tabela que está visível na aba Arquivos
             var script = @"(() => {
                 const arqs = [];
-                document.querySelectorAll('table').forEach(t => {
-                    t.querySelectorAll('tbody tr, tr:not(:first-child)').forEach(r => {
+                // Pega a tabela dentro do painel de arquivos
+                const tables = document.querySelectorAll('table');
+                tables.forEach(t => {
+                    const rows = t.querySelectorAll('tbody tr');
+                    rows.forEach(r => {
                         const c = r.querySelectorAll('td');
-                        if (c.length >= 2) {
+                        if (c.length >= 3) {
                             const nome = c[0]?.innerText?.trim() || '';
-                            if (nome && !nome.toLowerCase().includes('nome')) {
-                                arqs.push({ nome, tipo: c[1]?.innerText?.trim() || '', data: c[2]?.innerText?.trim() || '', url_download: '' });
+                            const tipo = c[1]?.innerText?.trim() || '';
+                            const data = c[2]?.innerText?.trim() || '';
+                            // Ignora cabeçalhos e linhas vazias
+                            if (nome && nome.length > 0 && !nome.toLowerCase().includes('nome') && nome !== 'Ações') {
+                                arqs.push({ nome, tipo, data, url_download: '' });
                             }
                         }
                     });
                 });
-                return arqs.filter((v,i,a) => a.findIndex(t => t.nome === v.nome) === i);
+                return arqs;
             })()";
-            return await page.EvaluateAsync<List<ArquivoData>>(script) ?? new List<ArquivoData>();
+            
+            var result = await page.EvaluateAsync<List<ArquivoData>>(script);
+            return result ?? new List<ArquivoData>();
         }
         catch { return new List<ArquivoData>(); }
     }
@@ -400,25 +407,42 @@ public static class LicitacoesTools
     {
         try
         {
-            var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Itens'), button:has-text('Itens')");
-            if (aba != null) { await aba.ClickAsync(); await page.WaitForTimeoutAsync(3000); }
+            // Clica na aba Itens
+            var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Itens')");
+            if (aba != null) 
+            { 
+                await aba.ClickAsync(); 
+                await page.WaitForTimeoutAsync(3000);
+            }
 
             var script = @"(() => {
                 const itens = [];
-                document.querySelectorAll('table').forEach(t => {
-                    t.querySelectorAll('tbody tr, tr:not(:first-child)').forEach(r => {
+                const tables = document.querySelectorAll('table');
+                tables.forEach(t => {
+                    const rows = t.querySelectorAll('tbody tr');
+                    rows.forEach(r => {
                         const c = r.querySelectorAll('td');
                         if (c.length >= 4) {
                             const num = c[0]?.innerText?.trim() || '';
                             if (/^\d+$/.test(num)) {
-                                itens.push({ numero: num, codigo: c[1]?.innerText?.trim() || '', descricao: c[2]?.innerText?.trim() || '', quantidade: c[3]?.innerText?.trim() || '', valor_unitario: 0, valor_total: 0, situacao: c.length > 6 ? c[6]?.innerText?.trim() || '' : '' });
+                                itens.push({ 
+                                    numero: num, 
+                                    codigo: c[1]?.innerText?.trim() || '', 
+                                    descricao: c[2]?.innerText?.trim() || '', 
+                                    quantidade: c[3]?.innerText?.trim() || '', 
+                                    valor_unitario: 0, 
+                                    valor_total: 0, 
+                                    situacao: c.length > 6 ? c[6]?.innerText?.trim() || '' : '' 
+                                });
                             }
                         }
                     });
                 });
                 return itens;
             })()";
-            return await page.EvaluateAsync<List<ItemData>>(script) ?? new List<ItemData>();
+            
+            var result = await page.EvaluateAsync<List<ItemData>>(script);
+            return result ?? new List<ItemData>();
         }
         catch { return new List<ItemData>(); }
     }
@@ -427,26 +451,56 @@ public static class LicitacoesTools
     {
         var script = @"(() => {
             const lics = [];
-            document.querySelectorAll('table tbody tr').forEach(r => {
+            const rows = document.querySelectorAll('table tbody tr');
+            
+            rows.forEach(r => {
                 const c = r.querySelectorAll('td');
+                
+                // Tenta encontrar o ID de várias formas
+                let id = '';
+                
+                // 1. Procura link com href contendo edital
                 const links = r.querySelectorAll('a[href*=""edital""]');
-                let href = links.length > 0 ? (links[0].getAttribute('href') || '') : '';
-                let id = (href.match(/edital\/(\d+)/) || [])[1] || '';
+                if (links.length > 0) {
+                    const href = links[0].getAttribute('href') || '';
+                    const match = href.match(/edital\/(\d+)/);
+                    if (match) id = match[1];
+                }
+                
+                // 2. Procura botão de visualização
+                if (!id) {
+                    const viewBtn = r.querySelector('button[mattooltip*=""isualizar""], button mat-icon');
+                    if (viewBtn) {
+                        // Tenta extrair do onclick ou data attribute
+                        const onclick = viewBtn.getAttribute('onclick') || '';
+                        const match = onclick.match(/(\d+)/);
+                        if (match) id = match[1];
+                    }
+                }
                 
                 if (c.length >= 5) {
                     const mod = c[0]?.innerText?.trim() || '';
                     const proc = c[2]?.innerText?.trim() || '';
-                    if (mod && proc) {
+                    
+                    if (mod && proc && !mod.toLowerCase().includes('modalidade')) {
                         lics.push({
-                            id, modalidade: mod, numero: c[1]?.innerText?.trim() || '', processo: proc,
-                            unidade: c[3]?.innerText?.trim() || '', objeto: c[4]?.innerText?.trim() || '',
-                            status: c[5]?.innerText?.trim() || '', url: id ? 'https://campinas.sp.gov.br/licitacoes/edital/' + id : ''
+                            id: id,
+                            modalidade: mod,
+                            numero: c[1]?.innerText?.trim() || '',
+                            processo: proc,
+                            unidade: c[3]?.innerText?.trim() || '',
+                            objeto: c[4]?.innerText?.trim() || '',
+                            status: c[5]?.innerText?.trim() || '',
+                            url: id ? 'https://campinas.sp.gov.br/licitacoes/edital/' + id : ''
                         });
                     }
                 }
             });
+            
             return lics;
         })()";
-        return await page.EvaluateAsync<List<LicitacaoResumo>>(script) ?? new List<LicitacaoResumo>();
+        
+        var result = await page.EvaluateAsync<List<LicitacaoResumo>>(script);
+        return result ?? new List<LicitacaoResumo>();
     }
 }

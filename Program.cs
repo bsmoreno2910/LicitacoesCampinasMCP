@@ -198,38 +198,6 @@ public static class LicitacoesTools
                 }
                 catch (Exception ex) { return JsonSerializer.Serialize(new { erro = $"Timeout: {ex.Message}" }); }
 
-                if (itens_por_pagina != 10)
-                {
-                    try
-                    {
-                        var sel = await page.QuerySelectorAsync("mat-select[aria-label*='Itens'], .mat-mdc-paginator-page-size-select");
-                        if (sel != null)
-                        {
-                            await sel.ClickAsync();
-                            await page.WaitForTimeoutAsync(500);
-                            await page.ClickAsync($"mat-option:has-text('{itens_por_pagina}')");
-                            await page.WaitForTimeoutAsync(3000);
-                            await page.WaitForFunctionAsync("() => !document.body.innerText.includes('Aguarde carregando')", new PageWaitForFunctionOptions { Timeout = 30000 });
-                        }
-                    }
-                    catch { }
-                }
-
-                for (int p = 1; p < pagina; p++)
-                {
-                    try
-                    {
-                        var next = await page.QuerySelectorAsync("button[aria-label*='Próxima'], button.mat-mdc-paginator-navigation-next");
-                        if (next != null && await next.IsEnabledAsync())
-                        {
-                            await next.ClickAsync();
-                            await page.WaitForTimeoutAsync(3000);
-                            await page.WaitForFunctionAsync("() => !document.body.innerText.includes('Aguarde carregando')", new PageWaitForFunctionOptions { Timeout = 30000 });
-                        }
-                    }
-                    catch { break; }
-                }
-
                 var lics = await ExtrairListaLicitacoes(page);
                 return JsonSerializer.Serialize(new { pagina, itens_por_pagina, total = lics.Count, licitacoes = lics }, new JsonSerializerOptions { WriteIndented = true });
             }
@@ -252,9 +220,9 @@ public static class LicitacoesTools
                 await page.WaitForSelectorAsync("text=Processo:", new PageWaitForSelectorOptions { Timeout = 45000 });
                 await page.WaitForTimeoutAsync(2000);
 
-                // Clica na aba Arquivos usando o seletor correto
-                var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Arquivos')");
-                if (aba != null) { await aba.ClickAsync(); await page.WaitForTimeoutAsync(3000); }
+                // Clica na aba Arquivos
+                await page.ClickAsync("#mat-tab-label-0-1");
+                await page.WaitForTimeoutAsync(3000);
 
                 var btn = await page.QuerySelectorAsync($"tr:has-text('{nome_arquivo}') button");
                 if (btn != null)
@@ -294,15 +262,14 @@ public static class LicitacoesTools
         lic.DataFimPropostas = await ExtrairCampo(page, "Data fim de recebimento propostas");
         lic.UltimaAlteracao = await ExtrairCampo(page, "Última alteração");
 
-        // Extrai valores usando seletor específico dos cards
         lic.ValorEstimado = await ExtrairValorCard(page, "Valor total estimado");
         lic.ValorHomologado = await ExtrairValorCard(page, "Valor total homologado");
 
-        // Extrai arquivos
-        lic.Arquivos = await ExtrairArquivos(page);
-        
-        // Extrai itens
+        // Extrai itens primeiro (aba padrão)
         lic.Itens = await ExtrairItens(page);
+        
+        // Depois clica na aba Arquivos e extrai
+        lic.Arquivos = await ExtrairArquivos(page);
 
         return lic;
     }
@@ -338,7 +305,6 @@ public static class LicitacoesTools
     {
         try
         {
-            // Busca o valor dentro do card específico
             var script = $@"(() => {{
                 const text = document.body.innerText;
                 const regex = new RegExp('{label}[\\s\\S]*?R\\$\\s*([\\d.,]+)', 'i');
@@ -358,42 +324,90 @@ public static class LicitacoesTools
         return decimal.TryParse(v, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var r) ? r : 0;
     }
 
+    private static async Task<List<ItemData>> ExtrairItens(IPage page)
+    {
+        try
+        {
+            // A aba Itens já está selecionada por padrão
+            await page.WaitForTimeoutAsync(1000);
+
+            var script = @"(() => {
+                const itens = [];
+                const rows = document.querySelectorAll('table tbody tr');
+                
+                rows.forEach(r => {
+                    const cells = r.querySelectorAll('td');
+                    if (cells.length >= 6) {
+                        const numText = cells[0]?.innerText?.trim() || '';
+                        // Verifica se é um número de item válido
+                        if (/^\d+$/.test(numText)) {
+                            const codigo = cells[1]?.innerText?.trim() || '';
+                            const descricao = cells[2]?.innerText?.trim() || '';
+                            const quantidade = cells[3]?.innerText?.trim() || '';
+                            const valorUnitarioText = cells[4]?.innerText?.trim() || '';
+                            const valorTotalText = cells[5]?.innerText?.trim() || '';
+                            const situacao = cells[6]?.innerText?.trim() || '';
+                            
+                            itens.push({
+                                numero: numText,
+                                codigo: codigo,
+                                descricao: descricao,
+                                quantidade: quantidade,
+                                valor_unitario_str: valorUnitarioText,
+                                valor_total_str: valorTotalText,
+                                situacao: situacao
+                            });
+                        }
+                    }
+                });
+                
+                return itens;
+            })()";
+            
+            var rawItens = await page.EvaluateAsync<List<Dictionary<string, string>>>(script);
+            
+            if (rawItens == null) return new List<ItemData>();
+            
+            return rawItens.Select(r => new ItemData
+            {
+                Numero = r.GetValueOrDefault("numero"),
+                Codigo = r.GetValueOrDefault("codigo"),
+                Descricao = r.GetValueOrDefault("descricao"),
+                Quantidade = r.GetValueOrDefault("quantidade"),
+                ValorUnitario = ConverterValor(r.GetValueOrDefault("valor_unitario_str")),
+                ValorTotal = ConverterValor(r.GetValueOrDefault("valor_total_str")),
+                Situacao = r.GetValueOrDefault("situacao")
+            }).ToList();
+        }
+        catch { return new List<ItemData>(); }
+    }
+
     private static async Task<List<ArquivoData>> ExtrairArquivos(IPage page)
     {
         try
         {
-            // Clica na aba Arquivos usando o seletor correto do Angular Material
-            var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Arquivos')");
-            if (aba != null) 
-            { 
-                await aba.ClickAsync(); 
-                await page.WaitForTimeoutAsync(3000);
-                
-                // Aguarda a tabela de arquivos aparecer
-                try { await page.WaitForSelectorAsync("table", new PageWaitForSelectorOptions { Timeout = 5000 }); }
-                catch { }
-            }
+            // Clica na aba Arquivos usando o ID específico
+            await page.ClickAsync("#mat-tab-label-0-1");
+            await page.WaitForTimeoutAsync(3000);
 
-            // Extrai arquivos da tabela que está visível na aba Arquivos
             var script = @"(() => {
                 const arqs = [];
-                // Pega a tabela dentro do painel de arquivos
-                const tables = document.querySelectorAll('table');
-                tables.forEach(t => {
-                    const rows = t.querySelectorAll('tbody tr');
-                    rows.forEach(r => {
-                        const c = r.querySelectorAll('td');
-                        if (c.length >= 3) {
-                            const nome = c[0]?.innerText?.trim() || '';
-                            const tipo = c[1]?.innerText?.trim() || '';
-                            const data = c[2]?.innerText?.trim() || '';
-                            // Ignora cabeçalhos e linhas vazias
-                            if (nome && nome.length > 0 && !nome.toLowerCase().includes('nome') && nome !== 'Ações') {
-                                arqs.push({ nome, tipo, data, url_download: '' });
-                            }
+                const rows = document.querySelectorAll('table tbody tr');
+                
+                rows.forEach(r => {
+                    const cells = r.querySelectorAll('td');
+                    if (cells.length >= 3) {
+                        const nome = cells[0]?.innerText?.trim() || '';
+                        const tipo = cells[1]?.innerText?.trim() || '';
+                        const data = cells[2]?.innerText?.trim() || '';
+                        
+                        // Ignora linhas de cabeçalho ou vazias
+                        if (nome && nome.length > 0 && !nome.toLowerCase().includes('nome') && nome !== 'Ações') {
+                            arqs.push({ nome, tipo, data, url_download: '' });
                         }
-                    });
+                    }
                 });
+                
                 return arqs;
             })()";
             
@@ -403,50 +417,6 @@ public static class LicitacoesTools
         catch { return new List<ArquivoData>(); }
     }
 
-    private static async Task<List<ItemData>> ExtrairItens(IPage page)
-    {
-        try
-        {
-            // Clica na aba Itens
-            var aba = await page.QuerySelectorAsync("div[role='tab']:has-text('Itens')");
-            if (aba != null) 
-            { 
-                await aba.ClickAsync(); 
-                await page.WaitForTimeoutAsync(3000);
-            }
-
-            var script = @"(() => {
-                const itens = [];
-                const tables = document.querySelectorAll('table');
-                tables.forEach(t => {
-                    const rows = t.querySelectorAll('tbody tr');
-                    rows.forEach(r => {
-                        const c = r.querySelectorAll('td');
-                        if (c.length >= 4) {
-                            const num = c[0]?.innerText?.trim() || '';
-                            if (/^\d+$/.test(num)) {
-                                itens.push({ 
-                                    numero: num, 
-                                    codigo: c[1]?.innerText?.trim() || '', 
-                                    descricao: c[2]?.innerText?.trim() || '', 
-                                    quantidade: c[3]?.innerText?.trim() || '', 
-                                    valor_unitario: 0, 
-                                    valor_total: 0, 
-                                    situacao: c.length > 6 ? c[6]?.innerText?.trim() || '' : '' 
-                                });
-                            }
-                        }
-                    });
-                });
-                return itens;
-            })()";
-            
-            var result = await page.EvaluateAsync<List<ItemData>>(script);
-            return result ?? new List<ItemData>();
-        }
-        catch { return new List<ItemData>(); }
-    }
-
     private static async Task<List<LicitacaoResumo>> ExtrairListaLicitacoes(IPage page)
     {
         var script = @"(() => {
@@ -454,43 +424,40 @@ public static class LicitacoesTools
             const rows = document.querySelectorAll('table tbody tr');
             
             rows.forEach(r => {
-                const c = r.querySelectorAll('td');
+                const cells = r.querySelectorAll('td');
                 
-                // Tenta encontrar o ID de várias formas
+                // Procura botão de visualização para extrair ID
                 let id = '';
-                
-                // 1. Procura link com href contendo edital
-                const links = r.querySelectorAll('a[href*=""edital""]');
-                if (links.length > 0) {
-                    const href = links[0].getAttribute('href') || '';
-                    const match = href.match(/edital\/(\d+)/);
-                    if (match) id = match[1];
-                }
-                
-                // 2. Procura botão de visualização
-                if (!id) {
-                    const viewBtn = r.querySelector('button[mattooltip*=""isualizar""], button mat-icon');
-                    if (viewBtn) {
-                        // Tenta extrair do onclick ou data attribute
-                        const onclick = viewBtn.getAttribute('onclick') || '';
-                        const match = onclick.match(/(\d+)/);
+                const viewBtn = r.querySelector('button');
+                if (viewBtn) {
+                    // O ID pode estar no atributo ou no onclick
+                    const parent = viewBtn.closest('tr');
+                    const links = parent?.querySelectorAll('a[href*=""edital""]');
+                    if (links && links.length > 0) {
+                        const href = links[0].getAttribute('href') || '';
+                        const match = href.match(/edital\/(\d+)/);
                         if (match) id = match[1];
                     }
                 }
                 
-                if (c.length >= 5) {
-                    const mod = c[0]?.innerText?.trim() || '';
-                    const proc = c[2]?.innerText?.trim() || '';
+                if (cells.length >= 5) {
+                    const mod = cells[0]?.innerText?.trim() || '';
+                    const num = cells[1]?.innerText?.trim() || '';
+                    const proc = cells[2]?.innerText?.trim() || '';
+                    const unid = cells[3]?.innerText?.trim() || '';
+                    const obj = cells[4]?.innerText?.trim() || '';
+                    const status = cells.length > 5 ? cells[5]?.innerText?.trim() || '' : '';
                     
-                    if (mod && proc && !mod.toLowerCase().includes('modalidade')) {
+                    // Ignora cabeçalhos
+                    if (mod && !mod.toLowerCase().includes('modalidade') && proc) {
                         lics.push({
                             id: id,
                             modalidade: mod,
-                            numero: c[1]?.innerText?.trim() || '',
+                            numero: num,
                             processo: proc,
-                            unidade: c[3]?.innerText?.trim() || '',
-                            objeto: c[4]?.innerText?.trim() || '',
-                            status: c[5]?.innerText?.trim() || '',
+                            unidade: unid,
+                            objeto: obj,
+                            status: status,
                             url: id ? 'https://campinas.sp.gov.br/licitacoes/edital/' + id : ''
                         });
                     }

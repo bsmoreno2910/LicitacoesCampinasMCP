@@ -41,6 +41,20 @@ class Program
 
         app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
         
+        // Endpoint para obter apenas a API Key
+        app.MapGet("/api/apikey", async (ApiService api) => {
+            try 
+            { 
+                var apiKey = await api.GetApiKeyAsync();
+                return Results.Ok(new { 
+                    api_key = apiKey, 
+                    expires_at = api.GetApiKeyExpiry(),
+                    base_url = "https://contratacoes-api.campinas.sp.gov.br"
+                }); 
+            }
+            catch (Exception ex) { return Results.Problem(ex.Message); }
+        });
+        
         app.MapGet("/api/edital/{id}", async (string id, ApiService api) => {
             try { return Results.Content(await LicitacoesTools.BuscarEdital(api, id), "application/json"); }
             catch (Exception ex) { return Results.Problem(ex.Message); }
@@ -67,6 +81,8 @@ public class ApiService : IAsyncDisposable
     
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
     private const string SITE_URL = "https://campinas.sp.gov.br/licitacoes/home";
+
+    public DateTime GetApiKeyExpiry() => _apiKeyExpiry;
 
     public async Task<string> GetApiKeyAsync()
     {
@@ -111,7 +127,6 @@ public class ApiService : IAsyncDisposable
 
                 if (string.IsNullOrEmpty(capturedKey))
                 {
-                    // Tenta clicar em um item para forçar requisição
                     try
                     {
                         await page.WaitForSelectorAsync("table tbody tr", new PageWaitForSelectorOptions { Timeout = 10000 });
@@ -136,7 +151,6 @@ public class ApiService : IAsyncDisposable
             _apiKey = capturedKey;
             _apiKeyExpiry = DateTime.UtcNow.AddMinutes(30);
 
-            // Recria o contexto de API com a nova key
             if (_apiContext != null)
                 await _apiContext.DisposeAsync();
 
@@ -190,7 +204,6 @@ public class ApiService : IAsyncDisposable
         }
 
         var json = await response.TextAsync();
-        Console.WriteLine($"Resposta: {json.Substring(0, Math.Min(200, json.Length))}...");
         return JsonDocument.Parse(json);
     }
 
@@ -204,60 +217,80 @@ public class ApiService : IAsyncDisposable
 
 public class LicitacaoData
 {
-    [JsonPropertyName("id")] public string? Id { get; set; }
-    [JsonPropertyName("titulo")] public string? Titulo { get; set; }
-    [JsonPropertyName("tipo")] public string? Tipo { get; set; }
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("numero_compra")] public string? NumeroCompra { get; set; }
     [JsonPropertyName("processo")] public string? Processo { get; set; }
-    [JsonPropertyName("secretaria")] public string? Secretaria { get; set; }
-    [JsonPropertyName("modalidade")] public string? Modalidade { get; set; }
-    [JsonPropertyName("instrumento_convocatorio")] public string? InstrumentoConvocatorio { get; set; }
-    [JsonPropertyName("modo_disputa")] public string? ModoDisputa { get; set; }
-    [JsonPropertyName("amparo_legal")] public string? AmparoLegal { get; set; }
-    [JsonPropertyName("link_contratacao")] public string? LinkContratacao { get; set; }
     [JsonPropertyName("objeto")] public string? Objeto { get; set; }
     [JsonPropertyName("informacao_complementar")] public string? InformacaoComplementar { get; set; }
-    [JsonPropertyName("id_pncp")] public string? IdPncp { get; set; }
+    [JsonPropertyName("data_abertura_proposta")] public string? DataAberturaProposta { get; set; }
+    [JsonPropertyName("data_encerramento_proposta")] public string? DataEncerramentoProposta { get; set; }
+    [JsonPropertyName("link_sistema_origem")] public string? LinkSistemaOrigem { get; set; }
+    [JsonPropertyName("sequencial_compra")] public int? SequencialCompra { get; set; }
     [JsonPropertyName("numero_controle_pncp")] public string? NumeroControlePncp { get; set; }
-    [JsonPropertyName("situacao_compra")] public string? SituacaoCompra { get; set; }
-    [JsonPropertyName("status_compra")] public string? StatusCompra { get; set; }
-    [JsonPropertyName("data_inicio_propostas")] public string? DataInicioPropostas { get; set; }
-    [JsonPropertyName("data_fim_propostas")] public string? DataFimPropostas { get; set; }
-    [JsonPropertyName("ultima_alteracao")] public string? UltimaAlteracao { get; set; }
-    [JsonPropertyName("valor_estimado")] public decimal ValorEstimado { get; set; }
-    [JsonPropertyName("valor_homologado")] public decimal ValorHomologado { get; set; }
-    [JsonPropertyName("data_extracao")] public string? DataExtracao { get; set; }
-    [JsonPropertyName("fonte")] public string Fonte { get; set; } = "campinas.sp.gov.br";
+    [JsonPropertyName("status")] public string? Status { get; set; }
+    [JsonPropertyName("updated_at")] public string? UpdatedAt { get; set; }
+    
+    // Relacionamentos
+    [JsonPropertyName("unidade")] public UnidadeData? Unidade { get; set; }
+    [JsonPropertyName("modalidade")] public DominioData? Modalidade { get; set; }
+    [JsonPropertyName("amparo_legal")] public DominioData? AmparoLegal { get; set; }
+    [JsonPropertyName("instrumento_convocatorio")] public DominioData? InstrumentoConvocatorio { get; set; }
+    [JsonPropertyName("modo_disputa")] public DominioData? ModoDisputa { get; set; }
+    [JsonPropertyName("situacao_compra")] public DominioData? SituacaoCompra { get; set; }
+    
+    // Calculados
+    [JsonPropertyName("valor_total_estimado")] public decimal ValorTotalEstimado { get; set; }
+    [JsonPropertyName("valor_total_homologado")] public decimal ValorTotalHomologado { get; set; }
+    
     [JsonPropertyName("arquivos")] public List<ArquivoData>? Arquivos { get; set; }
     [JsonPropertyName("itens")] public List<ItemData>? Itens { get; set; }
+    
+    [JsonPropertyName("data_extracao")] public string? DataExtracao { get; set; }
+    [JsonPropertyName("fonte")] public string Fonte { get; set; } = "campinas.sp.gov.br";
+}
+
+public class UnidadeData
+{
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("codigo")] public string? Codigo { get; set; }
+    [JsonPropertyName("nome")] public string? Nome { get; set; }
+}
+
+public class DominioData
+{
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("titulo")] public string? Titulo { get; set; }
 }
 
 public class ArquivoData
 {
-    [JsonPropertyName("nome")] public string? Nome { get; set; }
-    [JsonPropertyName("tipo")] public string? Tipo { get; set; }
-    [JsonPropertyName("data")] public string? Data { get; set; }
-    [JsonPropertyName("url_download")] public string? UrlDownload { get; set; }
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("tipo_documento")] public int TipoDocumento { get; set; }
+    [JsonPropertyName("titulo")] public string? Titulo { get; set; }
+    [JsonPropertyName("link_pncp")] public string? LinkPncp { get; set; }
+    [JsonPropertyName("created_at")] public string? CreatedAt { get; set; }
 }
 
 public class ItemData
 {
-    [JsonPropertyName("numero")] public string? Numero { get; set; }
-    [JsonPropertyName("codigo")] public string? Codigo { get; set; }
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("numero_item")] public int NumeroItem { get; set; }
+    [JsonPropertyName("codigo_reduzido")] public string? CodigoReduzido { get; set; }
     [JsonPropertyName("descricao")] public string? Descricao { get; set; }
-    [JsonPropertyName("quantidade")] public string? Quantidade { get; set; }
-    [JsonPropertyName("valor_unitario")] public decimal ValorUnitario { get; set; }
+    [JsonPropertyName("quantidade")] public decimal Quantidade { get; set; }
+    [JsonPropertyName("unidade_medida")] public string? UnidadeMedida { get; set; }
+    [JsonPropertyName("valor_unitario_estimado")] public decimal ValorUnitarioEstimado { get; set; }
     [JsonPropertyName("valor_total")] public decimal ValorTotal { get; set; }
-    [JsonPropertyName("situacao")] public string? Situacao { get; set; }
 }
 
 public class LicitacaoResumo
 {
-    [JsonPropertyName("id")] public string? Id { get; set; }
-    [JsonPropertyName("modalidade")] public string? Modalidade { get; set; }
-    [JsonPropertyName("numero")] public string? Numero { get; set; }
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("numero_compra")] public string? NumeroCompra { get; set; }
     [JsonPropertyName("processo")] public string? Processo { get; set; }
-    [JsonPropertyName("unidade")] public string? Unidade { get; set; }
     [JsonPropertyName("objeto")] public string? Objeto { get; set; }
+    [JsonPropertyName("modalidade")] public string? Modalidade { get; set; }
+    [JsonPropertyName("unidade")] public string? Unidade { get; set; }
     [JsonPropertyName("status")] public string? Status { get; set; }
     [JsonPropertyName("url")] public string? Url { get; set; }
 }
@@ -265,116 +298,163 @@ public class LicitacaoResumo
 [McpServerToolType]
 public static class LicitacoesTools
 {
+    [McpServerTool, Description("Obtém a API Key para acessar a API de contratações de Campinas.")]
+    public static async Task<string> ObterApiKey(ApiService api)
+    {
+        try
+        {
+            var apiKey = await api.GetApiKeyAsync();
+            return JsonSerializer.Serialize(new { 
+                api_key = apiKey, 
+                expires_at = api.GetApiKeyExpiry(),
+                base_url = "https://contratacoes-api.campinas.sp.gov.br"
+            }, new JsonSerializerOptions { WriteIndented = true });
+        }
+        catch (Exception ex)
+        {
+            return JsonSerializer.Serialize(new { erro = ex.Message });
+        }
+    }
+
     [McpServerTool, Description("Busca detalhes completos de um edital pelo ID, incluindo arquivos e itens.")]
     public static async Task<string> BuscarEdital(ApiService api, [Description("ID do edital (ex: 12043)")] string edital_id)
     {
         try
         {
-            var lic = new LicitacaoData { Id = edital_id, DataExtracao = DateTime.UtcNow.ToString("o") };
+            // Busca dados principais - JSON simples (sem wrapper data)
+            var compraDoc = await api.GetAsync($"/compras/{edital_id}?include=unidade,situacao_compra,modalidade,amparo_legal,instrumento_convocatorio,modo_disputa");
+            
+            if (compraDoc == null)
+                return JsonSerializer.Serialize(new { erro = "Edital não encontrado", id = edital_id });
 
-            // Busca dados principais
-            var compraDoc = await api.GetAsync($"/compras/{edital_id}?include=unidade,situacao_compra,modalidade,amparo_legal,instrumento_convocatorio,modo_disputa,situacao_pncp");
-            if (compraDoc != null)
+            var root = compraDoc.RootElement;
+            
+            var lic = new LicitacaoData
             {
-                var root = compraDoc.RootElement;
-                
-                if (root.TryGetProperty("data", out var data))
-                {
-                    if (data.TryGetProperty("attributes", out var attrs))
-                    {
-                        lic.Processo = GetString(attrs, "processo");
-                        lic.Objeto = GetString(attrs, "objeto");
-                        lic.InformacaoComplementar = GetString(attrs, "informacao_complementar");
-                        lic.DataInicioPropostas = GetString(attrs, "data_inicio_propostas");
-                        lic.DataFimPropostas = GetString(attrs, "data_fim_propostas");
-                        lic.UltimaAlteracao = GetString(attrs, "updated_at");
-                        lic.ValorEstimado = GetDecimal(attrs, "valor_total_estimado");
-                        lic.ValorHomologado = GetDecimal(attrs, "valor_total_homologado");
-                        lic.IdPncp = GetString(attrs, "pncp_id_compra");
-                        lic.NumeroControlePncp = GetString(attrs, "pncp_numero_controle");
-                        lic.LinkContratacao = GetString(attrs, "link_contratacao");
-                        lic.Titulo = GetString(attrs, "numero_compra");
-                    }
-                }
+                Id = GetInt(root, "id"),
+                NumeroCompra = GetString(root, "pncp_numero_compra"),
+                Processo = GetString(root, "pncp_numero_processo"),
+                Objeto = GetString(root, "pncp_objeto_compra"),
+                InformacaoComplementar = GetString(root, "pncp_informacao_complementar"),
+                DataAberturaProposta = GetString(root, "pncp_data_abertura_proposta"),
+                DataEncerramentoProposta = GetString(root, "pncp_data_encerramento_proposta"),
+                LinkSistemaOrigem = GetString(root, "pncp_link_sistema_origem"),
+                SequencialCompra = GetInt(root, "pncp_sequencial_compra"),
+                NumeroControlePncp = GetString(root, "numero_controle_pncp"),
+                Status = GetString(root, "status"),
+                UpdatedAt = GetString(root, "updated_at"),
+                DataExtracao = DateTime.UtcNow.ToString("o")
+            };
 
-                if (root.TryGetProperty("included", out var included))
+            // Unidade
+            if (root.TryGetProperty("unidade", out var unidade))
+            {
+                lic.Unidade = new UnidadeData
                 {
-                    foreach (var inc in included.EnumerateArray())
-                    {
-                        var type = GetString(inc, "type");
-                        if (inc.TryGetProperty("attributes", out var incAttrs))
-                        {
-                            switch (type)
-                            {
-                                case "modalidades": lic.Modalidade = GetString(incAttrs, "nome"); break;
-                                case "unidades": lic.Secretaria = GetString(incAttrs, "nome"); break;
-                                case "situacoes_compra": lic.SituacaoCompra = GetString(incAttrs, "nome"); break;
-                                case "amparos_legais": lic.AmparoLegal = GetString(incAttrs, "nome"); break;
-                                case "instrumentos_convocatorios": 
-                                    lic.InstrumentoConvocatorio = GetString(incAttrs, "nome"); 
-                                    lic.Tipo = GetString(incAttrs, "nome");
-                                    break;
-                                case "modos_disputa": lic.ModoDisputa = GetString(incAttrs, "nome"); break;
-                            }
-                        }
-                    }
-                }
+                    Id = GetInt(unidade, "id"),
+                    Codigo = GetString(unidade, "pncp_codigo_unidade"),
+                    Nome = GetString(unidade, "pncp_nome_unidade")
+                };
             }
 
-            // Busca itens
+            // Modalidade
+            if (root.TryGetProperty("modalidade", out var modalidade))
+            {
+                lic.Modalidade = new DominioData
+                {
+                    Id = GetInt(modalidade, "id"),
+                    Titulo = GetString(modalidade, "item_titulo")
+                };
+            }
+
+            // Amparo Legal
+            if (root.TryGetProperty("amparo_legal", out var amparoLegal))
+            {
+                lic.AmparoLegal = new DominioData
+                {
+                    Id = GetInt(amparoLegal, "id"),
+                    Titulo = GetString(amparoLegal, "item_titulo")
+                };
+            }
+
+            // Instrumento Convocatório
+            if (root.TryGetProperty("instrumento_convocatorio", out var instrConv))
+            {
+                lic.InstrumentoConvocatorio = new DominioData
+                {
+                    Id = GetInt(instrConv, "id"),
+                    Titulo = GetString(instrConv, "item_titulo")
+                };
+            }
+
+            // Modo de Disputa
+            if (root.TryGetProperty("modo_disputa", out var modoDisputa))
+            {
+                lic.ModoDisputa = new DominioData
+                {
+                    Id = GetInt(modoDisputa, "id"),
+                    Titulo = GetString(modoDisputa, "item_titulo")
+                };
+            }
+
+            // Situação da Compra
+            if (root.TryGetProperty("situacao_compra", out var sitCompra))
+            {
+                lic.SituacaoCompra = new DominioData
+                {
+                    Id = GetInt(sitCompra, "id"),
+                    Titulo = GetString(sitCompra, "item_titulo")
+                };
+            }
+
+            // Busca itens - JSON com wrapper data
             try
             {
                 var itensDoc = await api.GetAsync($"/compras/{edital_id}/itens/?page[number]=1&page[size]=1000&sort=pncp_numero_item");
-                if (itensDoc != null)
+                if (itensDoc != null && itensDoc.RootElement.TryGetProperty("data", out var itensData))
                 {
-                    var root = itensDoc.RootElement;
-                    if (root.TryGetProperty("data", out var itensData))
+                    lic.Itens = new List<ItemData>();
+                    decimal totalEstimado = 0;
+                    
+                    foreach (var item in itensData.EnumerateArray())
                     {
-                        lic.Itens = new List<ItemData>();
-                        foreach (var item in itensData.EnumerateArray())
+                        var itemData = new ItemData
                         {
-                            if (item.TryGetProperty("attributes", out var attrs))
-                            {
-                                lic.Itens.Add(new ItemData
-                                {
-                                    Numero = GetString(attrs, "pncp_numero_item"),
-                                    Codigo = GetString(attrs, "codigo_item"),
-                                    Descricao = GetString(attrs, "descricao"),
-                                    Quantidade = GetString(attrs, "quantidade"),
-                                    ValorUnitario = GetDecimal(attrs, "valor_unitario_estimado"),
-                                    ValorTotal = GetDecimal(attrs, "valor_total_estimado"),
-                                    Situacao = GetString(attrs, "situacao")
-                                });
-                            }
-                        }
+                            Id = GetInt(item, "id"),
+                            NumeroItem = GetInt(item, "pncp_numero_item"),
+                            CodigoReduzido = GetString(item, "codigo_reduzido"),
+                            Descricao = GetString(item, "pncp_descricao"),
+                            Quantidade = GetDecimal(item, "pncp_quantidade"),
+                            UnidadeMedida = GetString(item, "pncp_unidade_medida"),
+                            ValorUnitarioEstimado = GetDecimal(item, "pncp_valor_unitario_estimado"),
+                            ValorTotal = GetDecimal(item, "pncp_valor_total")
+                        };
+                        lic.Itens.Add(itemData);
+                        totalEstimado += itemData.ValorTotal;
                     }
+                    
+                    lic.ValorTotalEstimado = totalEstimado;
                 }
             }
             catch (Exception ex) { Console.WriteLine($"Erro ao buscar itens: {ex.Message}"); }
 
-            // Busca arquivos
+            // Busca arquivos - JSON com wrapper data
             try
             {
                 var arqsDoc = await api.GetAsync($"/compras/{edital_id}/arquivos?filter[acao][neq]=remover&sort=pncp_titulo_documento&page[number]=1&page[size]=1000");
-                if (arqsDoc != null)
+                if (arqsDoc != null && arqsDoc.RootElement.TryGetProperty("data", out var arqsData))
                 {
-                    var root = arqsDoc.RootElement;
-                    if (root.TryGetProperty("data", out var arqsData))
+                    lic.Arquivos = new List<ArquivoData>();
+                    foreach (var arq in arqsData.EnumerateArray())
                     {
-                        lic.Arquivos = new List<ArquivoData>();
-                        foreach (var arq in arqsData.EnumerateArray())
+                        lic.Arquivos.Add(new ArquivoData
                         {
-                            if (arq.TryGetProperty("attributes", out var attrs))
-                            {
-                                lic.Arquivos.Add(new ArquivoData
-                                {
-                                    Nome = GetString(attrs, "pncp_titulo_documento") ?? GetString(attrs, "nome_arquivo"),
-                                    Tipo = GetString(attrs, "tipo_documento"),
-                                    Data = GetString(attrs, "created_at"),
-                                    UrlDownload = GetString(attrs, "url_arquivo")
-                                });
-                            }
-                        }
+                            Id = GetInt(arq, "id"),
+                            TipoDocumento = GetInt(arq, "pncp_tipo_documento"),
+                            Titulo = GetString(arq, "pncp_titulo_documento"),
+                            LinkPncp = GetString(arq, "pncp_link"),
+                            CreatedAt = GetString(arq, "created_at")
+                        });
                     }
                 }
             }
@@ -401,54 +481,41 @@ public static class LicitacoesTools
             var lics = new List<LicitacaoResumo>();
             var root = doc.RootElement;
             
-            // Monta dicionário de includes
-            var includes = new Dictionary<string, JsonElement>();
-            if (root.TryGetProperty("included", out var included))
-            {
-                foreach (var inc in included.EnumerateArray())
-                {
-                    var type = GetString(inc, "type");
-                    var id = GetString(inc, "id");
-                    if (!string.IsNullOrEmpty(type) && !string.IsNullOrEmpty(id))
-                        includes[$"{type}:{id}"] = inc;
-                }
-            }
-
+            // A lista de compras também usa wrapper "data"
             if (root.TryGetProperty("data", out var data))
             {
                 foreach (var item in data.EnumerateArray())
                 {
-                    var id = GetString(item, "id");
+                    var id = GetInt(item, "id");
                     
                     var lic = new LicitacaoResumo
                     {
                         Id = id,
+                        NumeroCompra = GetString(item, "pncp_numero_compra"),
+                        Processo = GetString(item, "pncp_numero_processo"),
+                        Objeto = GetString(item, "pncp_objeto_compra"),
+                        Status = GetString(item, "status"),
                         Url = $"https://campinas.sp.gov.br/licitacoes/edital/{id}"
                     };
 
-                    if (item.TryGetProperty("attributes", out var attrs))
-                    {
-                        lic.Numero = GetString(attrs, "numero_compra");
-                        lic.Processo = GetString(attrs, "processo");
-                        lic.Objeto = GetString(attrs, "objeto");
-                    }
-
-                    if (item.TryGetProperty("relationships", out var rels))
-                    {
-                        lic.Modalidade = GetRelatedName(rels, "modalidade", "modalidades", includes);
-                        lic.Unidade = GetRelatedName(rels, "unidade", "unidades", includes);
-                        lic.Status = GetRelatedName(rels, "situacao_compra", "situacoes_compra", includes);
-                    }
+                    // Relacionamentos inline
+                    if (item.TryGetProperty("modalidade", out var mod))
+                        lic.Modalidade = GetString(mod, "item_titulo");
+                    
+                    if (item.TryGetProperty("unidade", out var unid))
+                        lic.Unidade = GetString(unid, "pncp_nome_unidade");
+                    
+                    if (item.TryGetProperty("situacao_compra", out var sit))
+                        lic.Status = GetString(sit, "item_titulo");
 
                     lics.Add(lic);
                 }
             }
 
             int total = 0;
-            if (root.TryGetProperty("meta", out var meta) && meta.TryGetProperty("page", out var pageMeta))
+            if (root.TryGetProperty("meta", out var meta))
             {
-                if (pageMeta.TryGetProperty("total", out var t))
-                    total = t.GetInt32();
+                total = GetInt(meta, "total_count");
             }
 
             return JsonSerializer.Serialize(new { pagina, itens_por_pagina, total, licitacoes = lics }, new JsonSerializerOptions { WriteIndented = true });
@@ -459,30 +526,24 @@ public static class LicitacoesTools
         }
     }
 
-    private static string? GetRelatedName(JsonElement rels, string relName, string typeName, Dictionary<string, JsonElement> includes)
-    {
-        try
-        {
-            if (rels.TryGetProperty(relName, out var rel) && 
-                rel.TryGetProperty("data", out var relData) &&
-                relData.ValueKind != JsonValueKind.Null)
-            {
-                var relId = GetString(relData, "id");
-                if (!string.IsNullOrEmpty(relId) && includes.TryGetValue($"{typeName}:{relId}", out var inc))
-                {
-                    if (inc.TryGetProperty("attributes", out var attrs))
-                        return GetString(attrs, "nome");
-                }
-            }
-        }
-        catch { }
-        return null;
-    }
-
     private static string? GetString(JsonElement el, string prop)
     {
         try { return el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null; }
         catch { return null; }
+    }
+
+    private static int GetInt(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.Number) return v.GetInt32();
+                if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var i)) return i;
+            }
+            return 0;
+        }
+        catch { return 0; }
     }
 
     private static decimal GetDecimal(JsonElement el, string prop)

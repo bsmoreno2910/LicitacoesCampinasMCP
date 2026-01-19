@@ -242,7 +242,7 @@ public class ApiService : IAsyncDisposable
         var fileName = $"arquivo_{arquivoId}";
         if (response.Headers.TryGetValue("content-disposition", out var cd))
         {
-            var match = System.Text.RegularExpressions.Regex.Match(cd, @"filename[^;=\n]*=(['"]?)([^'"\n]*)");
+            var match = System.Text.RegularExpressions.Regex.Match(cd, "filename[^;=\\n]*=(['\"]?)([^'\"\\n]*)");
             if (match.Success) fileName = match.Groups[2].Value;
         }
         

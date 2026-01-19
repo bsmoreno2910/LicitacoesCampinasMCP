@@ -29,4 +29,4 @@ ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
 
 # Comando de entrada
-ENTRYPOINT ["dotnet", "LicitacoesCampinasMCP.dll"]
+ENTRYPOINT ["dotnet", "LicitacoesCampinasMCP.dll", "--api"]

@@ -56,9 +56,6 @@ class Program
     }
 }
 
-/// <summary>
-/// Serviço que gerencia a API Key e faz requisições à API de Campinas
-/// </summary>
 public class ApiService : IAsyncDisposable
 {
     private IPlaywright? _playwright;
@@ -71,19 +68,14 @@ public class ApiService : IAsyncDisposable
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
     private const string SITE_URL = "https://campinas.sp.gov.br/licitacoes/home";
 
-    /// <summary>
-    /// Obtém a API Key interceptando requisições do site
-    /// </summary>
     public async Task<string> GetApiKeyAsync()
     {
-        // Se a key ainda é válida (cache de 30 minutos), retorna
         if (!string.IsNullOrEmpty(_apiKey) && DateTime.UtcNow < _apiKeyExpiry)
             return _apiKey;
 
         await _semaphore.WaitAsync();
         try
         {
-            // Double-check após obter o lock
             if (!string.IsNullOrEmpty(_apiKey) && DateTime.UtcNow < _apiKeyExpiry)
                 return _apiKey;
 
@@ -99,7 +91,6 @@ public class ApiService : IAsyncDisposable
             var page = await _browser.NewPageAsync();
             string? capturedKey = null;
 
-            // Intercepta requisições para capturar a API Key
             page.Request += (_, request) =>
             {
                 if (request.Url.Contains("contratacoes-api.campinas.sp.gov.br"))
@@ -108,29 +99,30 @@ public class ApiService : IAsyncDisposable
                     if (headers.TryGetValue("x-api-key", out var key))
                     {
                         capturedKey = key;
-                        Console.WriteLine($"API Key capturada: {key.Substring(0, 10)}...");
+                        Console.WriteLine($"API Key capturada: {key.Substring(0, Math.Min(10, key.Length))}...");
                     }
                 }
             };
 
             try
             {
-                // Navega para o site para disparar as requisições
-                await page.GotoAsync(SITE_URL, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 30000 });
-                
-                // Aguarda um pouco para garantir que as requisições foram feitas
-                await page.WaitForTimeoutAsync(3000);
+                await page.GotoAsync(SITE_URL, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 60000 });
+                await page.WaitForTimeoutAsync(5000);
 
                 if (string.IsNullOrEmpty(capturedKey))
                 {
-                    // Tenta clicar em algum item para forçar mais requisições
+                    // Tenta clicar em um item para forçar requisição
                     try
                     {
-                        var btn = await page.QuerySelectorAsync("button:has(mat-icon)");
-                        if (btn != null) await btn.ClickAsync();
-                        await page.WaitForTimeoutAsync(2000);
+                        await page.WaitForSelectorAsync("table tbody tr", new PageWaitForSelectorOptions { Timeout = 10000 });
+                        var btn = await page.QuerySelectorAsync("table tbody tr button");
+                        if (btn != null)
+                        {
+                            await btn.ClickAsync();
+                            await page.WaitForTimeoutAsync(3000);
+                        }
                     }
-                    catch { }
+                    catch (Exception ex) { Console.WriteLine($"Erro ao clicar: {ex.Message}"); }
                 }
             }
             finally
@@ -139,12 +131,15 @@ public class ApiService : IAsyncDisposable
             }
 
             if (string.IsNullOrEmpty(capturedKey))
-                throw new Exception("Não foi possível capturar a API Key");
+                throw new Exception("Não foi possível capturar a API Key. Verifique se o site está acessível.");
 
             _apiKey = capturedKey;
-            _apiKeyExpiry = DateTime.UtcNow.AddMinutes(30); // Cache por 30 minutos
+            _apiKeyExpiry = DateTime.UtcNow.AddMinutes(30);
 
-            // Cria o contexto de API com a key capturada
+            // Recria o contexto de API com a nova key
+            if (_apiContext != null)
+                await _apiContext.DisposeAsync();
+
             _apiContext = await _playwright.APIRequest.NewContextAsync(new APIRequestNewContextOptions
             {
                 BaseURL = BASE_URL,
@@ -157,6 +152,7 @@ public class ApiService : IAsyncDisposable
                 }
             });
 
+            Console.WriteLine("API Key configurada com sucesso!");
             return _apiKey;
         }
         finally
@@ -165,23 +161,21 @@ public class ApiService : IAsyncDisposable
         }
     }
 
-    /// <summary>
-    /// Faz uma requisição GET à API
-    /// </summary>
     public async Task<JsonDocument?> GetAsync(string endpoint)
     {
-        await GetApiKeyAsync(); // Garante que temos a API Key
+        await GetApiKeyAsync();
 
         if (_apiContext == null)
             throw new Exception("API Context não inicializado");
 
+        Console.WriteLine($"GET {endpoint}");
         var response = await _apiContext.GetAsync(endpoint);
         
         if (!response.Ok)
         {
-            // Se der erro 401/403, invalida a key e tenta novamente
             if (response.Status == 401 || response.Status == 403)
             {
+                Console.WriteLine("API Key expirada, renovando...");
                 _apiKey = null;
                 _apiKeyExpiry = DateTime.MinValue;
                 await GetApiKeyAsync();
@@ -190,9 +184,13 @@ public class ApiService : IAsyncDisposable
         }
 
         if (!response.Ok)
-            throw new Exception($"Erro na API: {response.Status} - {response.StatusText}");
+        {
+            var errorBody = await response.TextAsync();
+            throw new Exception($"Erro na API: {response.Status} - {errorBody}");
+        }
 
         var json = await response.TextAsync();
+        Console.WriteLine($"Resposta: {json.Substring(0, Math.Min(200, json.Length))}...");
         return JsonDocument.Parse(json);
     }
 
@@ -204,7 +202,6 @@ public class ApiService : IAsyncDisposable
     }
 }
 
-// Classes de modelo
 public class LicitacaoData
 {
     [JsonPropertyName("id")] public string? Id { get; set; }
@@ -279,84 +276,109 @@ public static class LicitacoesTools
             var compraDoc = await api.GetAsync($"/compras/{edital_id}?include=unidade,situacao_compra,modalidade,amparo_legal,instrumento_convocatorio,modo_disputa,situacao_pncp");
             if (compraDoc != null)
             {
-                var data = compraDoc.RootElement.GetProperty("data");
-                var attrs = data.GetProperty("attributes");
+                var root = compraDoc.RootElement;
+                
+                if (root.TryGetProperty("data", out var data))
+                {
+                    if (data.TryGetProperty("attributes", out var attrs))
+                    {
+                        lic.Processo = GetString(attrs, "processo");
+                        lic.Objeto = GetString(attrs, "objeto");
+                        lic.InformacaoComplementar = GetString(attrs, "informacao_complementar");
+                        lic.DataInicioPropostas = GetString(attrs, "data_inicio_propostas");
+                        lic.DataFimPropostas = GetString(attrs, "data_fim_propostas");
+                        lic.UltimaAlteracao = GetString(attrs, "updated_at");
+                        lic.ValorEstimado = GetDecimal(attrs, "valor_total_estimado");
+                        lic.ValorHomologado = GetDecimal(attrs, "valor_total_homologado");
+                        lic.IdPncp = GetString(attrs, "pncp_id_compra");
+                        lic.NumeroControlePncp = GetString(attrs, "pncp_numero_controle");
+                        lic.LinkContratacao = GetString(attrs, "link_contratacao");
+                        lic.Titulo = GetString(attrs, "numero_compra");
+                    }
+                }
 
-                lic.Processo = GetString(attrs, "processo");
-                lic.Objeto = GetString(attrs, "objeto");
-                lic.InformacaoComplementar = GetString(attrs, "informacao_complementar");
-                lic.DataInicioPropostas = GetString(attrs, "data_inicio_propostas");
-                lic.DataFimPropostas = GetString(attrs, "data_fim_propostas");
-                lic.UltimaAlteracao = GetString(attrs, "updated_at");
-                lic.ValorEstimado = GetDecimal(attrs, "valor_total_estimado");
-                lic.ValorHomologado = GetDecimal(attrs, "valor_total_homologado");
-                lic.IdPncp = GetString(attrs, "pncp_id_compra");
-                lic.NumeroControlePncp = GetString(attrs, "pncp_numero_controle");
-                lic.LinkContratacao = GetString(attrs, "link_contratacao");
-                lic.Titulo = GetString(attrs, "numero_compra");
-
-                // Dados incluídos (relacionamentos)
-                if (compraDoc.RootElement.TryGetProperty("included", out var included))
+                if (root.TryGetProperty("included", out var included))
                 {
                     foreach (var inc in included.EnumerateArray())
                     {
                         var type = GetString(inc, "type");
-                        var incAttrs = inc.GetProperty("attributes");
-                        
-                        switch (type)
+                        if (inc.TryGetProperty("attributes", out var incAttrs))
                         {
-                            case "modalidades": lic.Modalidade = GetString(incAttrs, "nome"); break;
-                            case "unidades": lic.Secretaria = GetString(incAttrs, "nome"); break;
-                            case "situacoes_compra": lic.SituacaoCompra = GetString(incAttrs, "nome"); break;
-                            case "amparos_legais": lic.AmparoLegal = GetString(incAttrs, "nome"); break;
-                            case "instrumentos_convocatorios": 
-                                lic.InstrumentoConvocatorio = GetString(incAttrs, "nome"); 
-                                lic.Tipo = GetString(incAttrs, "nome");
-                                break;
-                            case "modos_disputa": lic.ModoDisputa = GetString(incAttrs, "nome"); break;
+                            switch (type)
+                            {
+                                case "modalidades": lic.Modalidade = GetString(incAttrs, "nome"); break;
+                                case "unidades": lic.Secretaria = GetString(incAttrs, "nome"); break;
+                                case "situacoes_compra": lic.SituacaoCompra = GetString(incAttrs, "nome"); break;
+                                case "amparos_legais": lic.AmparoLegal = GetString(incAttrs, "nome"); break;
+                                case "instrumentos_convocatorios": 
+                                    lic.InstrumentoConvocatorio = GetString(incAttrs, "nome"); 
+                                    lic.Tipo = GetString(incAttrs, "nome");
+                                    break;
+                                case "modos_disputa": lic.ModoDisputa = GetString(incAttrs, "nome"); break;
+                            }
                         }
                     }
                 }
             }
 
             // Busca itens
-            var itensDoc = await api.GetAsync($"/compras/{edital_id}/itens/?page[number]=1&page[size]=1000&sort=pncp_numero_item");
-            if (itensDoc != null && itensDoc.RootElement.TryGetProperty("data", out var itensData))
+            try
             {
-                lic.Itens = new List<ItemData>();
-                foreach (var item in itensData.EnumerateArray())
+                var itensDoc = await api.GetAsync($"/compras/{edital_id}/itens/?page[number]=1&page[size]=1000&sort=pncp_numero_item");
+                if (itensDoc != null)
                 {
-                    var attrs = item.GetProperty("attributes");
-                    lic.Itens.Add(new ItemData
+                    var root = itensDoc.RootElement;
+                    if (root.TryGetProperty("data", out var itensData))
                     {
-                        Numero = GetString(attrs, "pncp_numero_item"),
-                        Codigo = GetString(attrs, "codigo_item"),
-                        Descricao = GetString(attrs, "descricao"),
-                        Quantidade = GetString(attrs, "quantidade"),
-                        ValorUnitario = GetDecimal(attrs, "valor_unitario_estimado"),
-                        ValorTotal = GetDecimal(attrs, "valor_total_estimado"),
-                        Situacao = GetString(attrs, "situacao")
-                    });
+                        lic.Itens = new List<ItemData>();
+                        foreach (var item in itensData.EnumerateArray())
+                        {
+                            if (item.TryGetProperty("attributes", out var attrs))
+                            {
+                                lic.Itens.Add(new ItemData
+                                {
+                                    Numero = GetString(attrs, "pncp_numero_item"),
+                                    Codigo = GetString(attrs, "codigo_item"),
+                                    Descricao = GetString(attrs, "descricao"),
+                                    Quantidade = GetString(attrs, "quantidade"),
+                                    ValorUnitario = GetDecimal(attrs, "valor_unitario_estimado"),
+                                    ValorTotal = GetDecimal(attrs, "valor_total_estimado"),
+                                    Situacao = GetString(attrs, "situacao")
+                                });
+                            }
+                        }
+                    }
                 }
             }
+            catch (Exception ex) { Console.WriteLine($"Erro ao buscar itens: {ex.Message}"); }
 
             // Busca arquivos
-            var arqsDoc = await api.GetAsync($"/compras/{edital_id}/arquivos?filter[acao][neq]=remover&sort=pncp_titulo_documento&page[number]=1&page[size]=1000");
-            if (arqsDoc != null && arqsDoc.RootElement.TryGetProperty("data", out var arqsData))
+            try
             {
-                lic.Arquivos = new List<ArquivoData>();
-                foreach (var arq in arqsData.EnumerateArray())
+                var arqsDoc = await api.GetAsync($"/compras/{edital_id}/arquivos?filter[acao][neq]=remover&sort=pncp_titulo_documento&page[number]=1&page[size]=1000");
+                if (arqsDoc != null)
                 {
-                    var attrs = arq.GetProperty("attributes");
-                    lic.Arquivos.Add(new ArquivoData
+                    var root = arqsDoc.RootElement;
+                    if (root.TryGetProperty("data", out var arqsData))
                     {
-                        Nome = GetString(attrs, "pncp_titulo_documento") ?? GetString(attrs, "nome_arquivo"),
-                        Tipo = GetString(attrs, "tipo_documento"),
-                        Data = GetString(attrs, "created_at"),
-                        UrlDownload = GetString(attrs, "url_arquivo")
-                    });
+                        lic.Arquivos = new List<ArquivoData>();
+                        foreach (var arq in arqsData.EnumerateArray())
+                        {
+                            if (arq.TryGetProperty("attributes", out var attrs))
+                            {
+                                lic.Arquivos.Add(new ArquivoData
+                                {
+                                    Nome = GetString(attrs, "pncp_titulo_documento") ?? GetString(attrs, "nome_arquivo"),
+                                    Tipo = GetString(attrs, "tipo_documento"),
+                                    Data = GetString(attrs, "created_at"),
+                                    UrlDownload = GetString(attrs, "url_arquivo")
+                                });
+                            }
+                        }
+                    }
                 }
             }
+            catch (Exception ex) { Console.WriteLine($"Erro ao buscar arquivos: {ex.Message}"); }
 
             return JsonSerializer.Serialize(lic, new JsonSerializerOptions { WriteIndented = true });
         }
@@ -377,77 +399,56 @@ public static class LicitacoesTools
                 return JsonSerializer.Serialize(new { erro = "Sem resposta da API" });
 
             var lics = new List<LicitacaoResumo>();
+            var root = doc.RootElement;
             
-            if (doc.RootElement.TryGetProperty("data", out var data))
+            // Monta dicionário de includes
+            var includes = new Dictionary<string, JsonElement>();
+            if (root.TryGetProperty("included", out var included))
             {
-                // Monta dicionário de includes para lookup
-                var includes = new Dictionary<string, JsonElement>();
-                if (doc.RootElement.TryGetProperty("included", out var included))
+                foreach (var inc in included.EnumerateArray())
                 {
-                    foreach (var inc in included.EnumerateArray())
-                    {
-                        var type = GetString(inc, "type");
-                        var id = GetString(inc, "id");
-                        if (!string.IsNullOrEmpty(type) && !string.IsNullOrEmpty(id))
-                            includes[$"{type}:{id}"] = inc;
-                    }
+                    var type = GetString(inc, "type");
+                    var id = GetString(inc, "id");
+                    if (!string.IsNullOrEmpty(type) && !string.IsNullOrEmpty(id))
+                        includes[$"{type}:{id}"] = inc;
                 }
+            }
 
+            if (root.TryGetProperty("data", out var data))
+            {
                 foreach (var item in data.EnumerateArray())
                 {
                     var id = GetString(item, "id");
-                    var attrs = item.GetProperty("attributes");
                     
                     var lic = new LicitacaoResumo
                     {
                         Id = id,
-                        Numero = GetString(attrs, "numero_compra"),
-                        Processo = GetString(attrs, "processo"),
-                        Objeto = GetString(attrs, "objeto"),
                         Url = $"https://campinas.sp.gov.br/licitacoes/edital/{id}"
                     };
 
-                    // Busca relacionamentos
+                    if (item.TryGetProperty("attributes", out var attrs))
+                    {
+                        lic.Numero = GetString(attrs, "numero_compra");
+                        lic.Processo = GetString(attrs, "processo");
+                        lic.Objeto = GetString(attrs, "objeto");
+                    }
+
                     if (item.TryGetProperty("relationships", out var rels))
                     {
-                        if (rels.TryGetProperty("modalidade", out var modRel) && 
-                            modRel.TryGetProperty("data", out var modData) &&
-                            modData.ValueKind != JsonValueKind.Null)
-                        {
-                            var modId = GetString(modData, "id");
-                            if (includes.TryGetValue($"modalidades:{modId}", out var mod))
-                                lic.Modalidade = GetString(mod.GetProperty("attributes"), "nome");
-                        }
-
-                        if (rels.TryGetProperty("unidade", out var unidRel) && 
-                            unidRel.TryGetProperty("data", out var unidData) &&
-                            unidData.ValueKind != JsonValueKind.Null)
-                        {
-                            var unidId = GetString(unidData, "id");
-                            if (includes.TryGetValue($"unidades:{unidId}", out var unid))
-                                lic.Unidade = GetString(unid.GetProperty("attributes"), "nome");
-                        }
-
-                        if (rels.TryGetProperty("situacao_compra", out var sitRel) && 
-                            sitRel.TryGetProperty("data", out var sitData) &&
-                            sitData.ValueKind != JsonValueKind.Null)
-                        {
-                            var sitId = GetString(sitData, "id");
-                            if (includes.TryGetValue($"situacoes_compra:{sitId}", out var sit))
-                                lic.Status = GetString(sit.GetProperty("attributes"), "nome");
-                        }
+                        lic.Modalidade = GetRelatedName(rels, "modalidade", "modalidades", includes);
+                        lic.Unidade = GetRelatedName(rels, "unidade", "unidades", includes);
+                        lic.Status = GetRelatedName(rels, "situacao_compra", "situacoes_compra", includes);
                     }
 
                     lics.Add(lic);
                 }
             }
 
-            // Pega metadados de paginação
             int total = 0;
-            if (doc.RootElement.TryGetProperty("meta", out var meta) && 
-                meta.TryGetProperty("page", out var pageMeta))
+            if (root.TryGetProperty("meta", out var meta) && meta.TryGetProperty("page", out var pageMeta))
             {
-                total = pageMeta.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
+                if (pageMeta.TryGetProperty("total", out var t))
+                    total = t.GetInt32();
             }
 
             return JsonSerializer.Serialize(new { pagina, itens_por_pagina, total, licitacoes = lics }, new JsonSerializerOptions { WriteIndented = true });
@@ -456,6 +457,26 @@ public static class LicitacoesTools
         {
             return JsonSerializer.Serialize(new { erro = ex.Message });
         }
+    }
+
+    private static string? GetRelatedName(JsonElement rels, string relName, string typeName, Dictionary<string, JsonElement> includes)
+    {
+        try
+        {
+            if (rels.TryGetProperty(relName, out var rel) && 
+                rel.TryGetProperty("data", out var relData) &&
+                relData.ValueKind != JsonValueKind.Null)
+            {
+                var relId = GetString(relData, "id");
+                if (!string.IsNullOrEmpty(relId) && includes.TryGetValue($"{typeName}:{relId}", out var inc))
+                {
+                    if (inc.TryGetProperty("attributes", out var attrs))
+                        return GetString(attrs, "nome");
+                }
+            }
+        }
+        catch { }
+        return null;
     }
 
     private static string? GetString(JsonElement el, string prop)

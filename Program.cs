@@ -70,6 +70,30 @@ class Program
             try { return Results.Content(await LicitacoesTools.BuscarPorFiltro(api, processo, objeto), "application/json"); }
             catch (Exception ex) { return Results.Problem(ex.Message); }
         });
+        
+        // Endpoint para download de arquivo
+        app.MapGet("/api/compra/{compraId}/arquivo/{arquivoId}/download", async (string compraId, string arquivoId, ApiService api) => {
+            try 
+            { 
+                var (bytes, contentType, fileName) = await api.DownloadArquivoAsync(compraId, arquivoId);
+                return Results.File(bytes, contentType, fileName);
+            }
+            catch (Exception ex) { return Results.Problem(ex.Message); }
+        });
+        
+        // Endpoint para obter URL de download de arquivo
+        app.MapGet("/api/compra/{compraId}/arquivo/{arquivoId}/url", async (string compraId, string arquivoId, ApiService api) => {
+            try 
+            { 
+                var apiKey = await api.GetApiKeyAsync();
+                return Results.Ok(new { 
+                    download_url = $"https://contratacoes-api.campinas.sp.gov.br/compras/{compraId}/arquivos/{arquivoId}/blob",
+                    api_key = apiKey,
+                    headers = new { x_api_key = apiKey }
+                });
+            }
+            catch (Exception ex) { return Results.Problem(ex.Message); }
+        });
 
         Console.WriteLine("API HTTP em http://0.0.0.0:8080");
         await app.RunAsync();
@@ -179,6 +203,67 @@ public class ApiService : IAsyncDisposable
         {
             _semaphore.Release();
         }
+    }
+
+    public async Task<(byte[] bytes, string contentType, string fileName)> DownloadArquivoAsync(string compraId, string arquivoId)
+    {
+        await GetApiKeyAsync();
+
+        if (_apiContext == null)
+            throw new Exception("API Context não inicializado");
+
+        var endpoint = $"/compras/{compraId}/arquivos/{arquivoId}/blob";
+        Console.WriteLine($"DOWNLOAD {endpoint}");
+        
+        var response = await _apiContext.GetAsync(endpoint);
+        
+        if (!response.Ok)
+        {
+            if (response.Status == 401 || response.Status == 403)
+            {
+                Console.WriteLine("API Key expirada, renovando...");
+                _apiKey = null;
+                _apiKeyExpiry = DateTime.MinValue;
+                await GetApiKeyAsync();
+                response = await _apiContext.GetAsync(endpoint);
+            }
+        }
+
+        if (!response.Ok)
+        {
+            var errorBody = await response.TextAsync();
+            throw new Exception($"Erro ao baixar arquivo: {response.Status} - {errorBody}");
+        }
+
+        var bytes = await response.BodyAsync();
+        var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
+        
+        // Tentar extrair nome do arquivo do header content-disposition
+        var fileName = $"arquivo_{arquivoId}";
+        if (response.Headers.TryGetValue("content-disposition", out var cd))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(cd, @"filename[^;=\n]*=(['"]?)([^'"\n]*)");
+            if (match.Success) fileName = match.Groups[2].Value;
+        }
+        
+        // Adicionar extensão baseada no content-type se não tiver
+        if (!fileName.Contains("."))
+        {
+            fileName += contentType switch
+            {
+                "application/pdf" => ".pdf",
+                "image/jpeg" => ".jpg",
+                "image/png" => ".png",
+                "application/zip" => ".zip",
+                "application/msword" => ".doc",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+                "application/vnd.ms-excel" => ".xls",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+                _ => ""
+            };
+        }
+
+        return (bytes, contentType, fileName);
     }
 
     public async Task<JsonDocument?> GetAsync(string endpoint)

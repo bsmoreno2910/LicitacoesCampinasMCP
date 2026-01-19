@@ -21,12 +21,13 @@ WORKDIR /app
 # Copia aplicação compilada
 COPY --from=build /app/publish .
 
-# Variáveis de ambiente
+# Variáveis de ambiente - FORÇA MODO API
 ENV DOTNET_RUNNING_IN_CONTAINER=true
 ENV ASPNETCORE_URLS=http://+:8080
+ENV RUN_AS_API=true
 
-# Expõe porta para API HTTP (se necessário)
+# Expõe porta para API HTTP
 EXPOSE 8080
 
-# Comando de entrada
+# Comando de entrada com flag --api
 ENTRYPOINT ["dotnet", "LicitacoesCampinasMCP.dll", "--api"]

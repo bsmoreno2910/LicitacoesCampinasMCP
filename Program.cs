@@ -15,13 +15,8 @@ class Program
     static async Task Main(string[] args)
     {
         var runAsApi = Environment.GetEnvironmentVariable("RUN_AS_API") == "true" || args.Contains("--api");
-        var runAsMcpSse = Environment.GetEnvironmentVariable("RUN_AS_MCP_SSE") == "true" || args.Contains("--mcp-sse");
 
-        if (runAsMcpSse)
-        {
-            await RunAsMcpSseServer(args);
-        }
-        else if (runAsApi)
+        if (runAsApi)
         {
             await RunAsHttpApi(args);
         }
@@ -40,19 +35,6 @@ class Program
             .WithStdioServerTransport()
             .WithToolsFromAssembly();
         await builder.Build().RunAsync();
-    }
-
-    static async Task RunAsMcpSseServer(string[] args)
-    {
-        var builder = WebApplication.CreateBuilder(args);
-        builder.Services.AddSingleton<PlaywrightService>();
-        builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = "licitacoes-campinas", Version = "1.0.0" })
-            .WithHttpTransport()
-            .WithToolsFromAssembly();
-        var app = builder.Build();
-        app.MapMcp();
-        Console.WriteLine("MCP Server (SSE) em http://0.0.0.0:8080/sse");
-        await app.RunAsync();
     }
 
     static async Task RunAsHttpApi(string[] args)

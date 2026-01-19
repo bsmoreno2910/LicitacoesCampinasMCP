@@ -2,14 +2,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Playwright;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
-using ModelContextProtocol;
-using ModelContextProtocol.Server;
-
 
 namespace LicitacoesCampinasMCP;
 
@@ -17,26 +14,107 @@ class Program
 {
     static async Task Main(string[] args)
     {
+        // Verifica se deve rodar como API HTTP ou MCP stdio
+        var runAsApi = Environment.GetEnvironmentVariable("RUN_AS_API") == "true" || args.Contains("--api");
+
+        if (runAsApi)
+        {
+            await RunAsHttpApi(args);
+        }
+        else
+        {
+            await RunAsMcpServer(args);
+        }
+    }
+
+    static async Task RunAsMcpServer(string[] args)
+    {
         var builder = Host.CreateApplicationBuilder(args);
-        
+
         builder.Logging.AddConsole(consoleLogOptions =>
         {
-            // Configure all logs to go to stderr
             consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
         });
 
-        // Registra o Playwright como singleton
         builder.Services.AddSingleton<PlaywrightService>();
-        
-       builder.Services
-        .AddMcpServer(options =>
-        {
-            options.ServerInfo = new() { Name = "licitacoes-campinas", Version = "1.0.0" };
-        }).WithStdioServerTransport().WithToolsFromAssembly();
+
+        builder.Services
+            .AddMcpServer(options =>
+            {
+                options.ServerInfo = new() { Name = "licitacoes-campinas", Version = "1.0.0" };
+            })
+            .WithStdioServerTransport()
+            .WithToolsFromAssembly();
 
         await builder.Build().RunAsync();
     }
+
+    static async Task RunAsHttpApi(string[] args)
+    {
+        var builder = WebApplication.CreateBuilder(args);
+
+        builder.Services.AddSingleton<PlaywrightService>();
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen();
+
+        var app = builder.Build();
+
+        app.UseSwagger();
+        app.UseSwaggerUI();
+
+        // Endpoint de health check
+        app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
+
+        // Endpoint para buscar edital
+        app.MapGet("/api/edital/{id}", async (string id, PlaywrightService playwrightService) =>
+        {
+            try
+            {
+                var result = await LicitacoesTools.BuscarEdital(playwrightService, id);
+                return Results.Content(result, "application/json");
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem(ex.Message);
+            }
+        });
+
+        // Endpoint para listar licitações
+        app.MapGet("/api/licitacoes", async (int? pagina, int? itens, PlaywrightService playwrightService) =>
+        {
+            try
+            {
+                var result = await LicitacoesTools.BuscarListaLicitacoes(playwrightService, pagina ?? 1, itens ?? 100);
+                return Results.Content(result, "application/json");
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem(ex.Message);
+            }
+        });
+
+        // Endpoint para baixar arquivo
+        app.MapPost("/api/edital/{id}/arquivo", async (string id, ArquivoRequest request, PlaywrightService playwrightService) =>
+        {
+            try
+            {
+                var result = await LicitacoesTools.BaixarArquivoEdital(playwrightService, id, request.NomeArquivo, request.PastaDestino ?? "/tmp/downloads");
+                return Results.Content(result, "application/json");
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem(ex.Message);
+            }
+        });
+
+        Console.WriteLine("API HTTP iniciada em http://0.0.0.0:8080");
+        Console.WriteLine("Swagger disponível em http://0.0.0.0:8080/swagger");
+
+        await app.RunAsync();
+    }
 }
+
+public record ArquivoRequest(string NomeArquivo, string? PastaDestino);
 
 // ============================================================
 // SERVIÇO DO PLAYWRIGHT
@@ -60,7 +138,8 @@ public class PlaywrightService : IAsyncDisposable
             _playwright = await Playwright.CreateAsync();
             _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
             {
-                Headless = true
+                Headless = true,
+                Args = new[] { "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage" }
             });
 
             return _browser;
@@ -236,7 +315,7 @@ public class LicitacaoResumo
 [McpServerToolType]
 public static class LicitacoesTools
 {
-[McpServerTool, Description("Busca os detalhes completos de um edital/licitação pelo ID. Retorna todas as informações incluindo arquivos e itens.")]
+    [McpServerTool, Description("Busca os detalhes completos de um edital/licitação pelo ID. Retorna todas as informações incluindo arquivos e itens.")]
     public static async Task<string> BuscarEdital(
         PlaywrightService playwrightService,
         [Description("ID do edital a ser buscado (ex: 12043)")] string edital_id)
@@ -251,7 +330,6 @@ public static class LicitacoesTools
                 var url = $"https://campinas.sp.gov.br/licitacoes/edital/{edital_id}";
                 await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
 
-                // Aguarda o conteúdo carregar
                 try
                 {
                     await page.WaitForSelectorAsync("text=Processo:", new PageWaitForSelectorOptions { Timeout = 30000 });
@@ -261,9 +339,7 @@ public static class LicitacoesTools
                     return JsonSerializer.Serialize(new { erro = "Edital não encontrado ou página não carregou", id = edital_id });
                 }
 
-                // Extrai os dados
                 var licitacao = await ExtrairDadosLicitacao(page, edital_id);
-
                 return JsonSerializer.Serialize(licitacao, new JsonSerializerOptions { WriteIndented = true });
             }
             finally
@@ -277,7 +353,7 @@ public static class LicitacoesTools
         }
     }
 
-[McpServerTool, Description("Busca a lista de licitações da página principal com paginação.")]
+    [McpServerTool, Description("Busca a lista de licitações da página principal com paginação.")]
     public static async Task<string> BuscarListaLicitacoes(
         PlaywrightService playwrightService,
         [Description("Número da página (padrão: 1)")] int pagina = 1,
@@ -293,10 +369,8 @@ public static class LicitacoesTools
                 await page.GotoAsync("https://campinas.sp.gov.br/licitacoes/home",
                     new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
 
-                // Aguarda a tabela carregar
                 await page.WaitForSelectorAsync("table", new PageWaitForSelectorOptions { Timeout = 30000 });
 
-                // Muda itens por página se necessário
                 if (itens_por_pagina != 10)
                 {
                     try
@@ -313,7 +387,6 @@ public static class LicitacoesTools
                     catch { }
                 }
 
-                // Navega para a página desejada
                 for (int pag = 1; pag < pagina; pag++)
                 {
                     try
@@ -328,9 +401,7 @@ public static class LicitacoesTools
                     catch { break; }
                 }
 
-                // Extrai dados da tabela
                 var licitacoes = await ExtrairListaLicitacoes(page);
-
                 return JsonSerializer.Serialize(licitacoes, new JsonSerializerOptions { WriteIndented = true });
             }
             finally
@@ -353,7 +424,6 @@ public static class LicitacoesTools
     {
         try
         {
-            // Cria pasta de destino se não existir
             Directory.CreateDirectory(pasta_destino);
 
             var browser = await playwrightService.GetBrowserAsync();
@@ -364,7 +434,6 @@ public static class LicitacoesTools
                 var url = $"https://campinas.sp.gov.br/licitacoes/edital/{edital_id}";
                 await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
 
-                // Clica na aba Arquivos
                 try
                 {
                     await page.ClickAsync("text=Arquivos");
@@ -372,12 +441,10 @@ public static class LicitacoesTools
                 }
                 catch { }
 
-                // Encontra o botão de download do arquivo
                 var downloadButton = await page.QuerySelectorAsync($"tr:has-text('{nome_arquivo}') button");
 
                 if (downloadButton != null)
                 {
-                    // Configura para capturar o download
                     var download = await page.RunAndWaitForDownloadAsync(async () =>
                     {
                         await downloadButton.ClickAsync();
@@ -416,7 +483,6 @@ public static class LicitacoesTools
             DataExtracao = DateTime.UtcNow.ToString("o")
         };
 
-        // Extrai campos usando JavaScript no navegador
         licitacao.Titulo = await ExtrairTexto(page, "h2");
         licitacao.Tipo = await ExtrairCampo(page, "Tipo:");
         licitacao.Processo = await ExtrairCampo(page, "Processo:");
@@ -436,17 +502,13 @@ public static class LicitacoesTools
         licitacao.DataFimPropostas = await ExtrairCampo(page, "Data fim de recebimento propostas:");
         licitacao.UltimaAlteracao = await ExtrairCampo(page, "Última alteração:");
 
-        // Extrai valores
         var valorEstimadoStr = await ExtrairValor(page, "Valor total estimado");
         licitacao.ValorEstimado = ConverterValorBrasileiro(valorEstimadoStr);
 
         var valorHomologadoStr = await ExtrairValor(page, "Valor total homologado");
         licitacao.ValorHomologado = ConverterValorBrasileiro(valorHomologadoStr);
 
-        // Extrai arquivos (clica na aba Arquivos)
         licitacao.Arquivos = await ExtrairArquivos(page);
-
-        // Extrai itens (clica na aba Itens)
         licitacao.Itens = await ExtrairItens(page);
 
         return licitacao;
@@ -512,7 +574,7 @@ public static class LicitacoesTools
         valorStr = valorStr.Replace("R$", "").Trim();
         valorStr = valorStr.Replace(".", "").Replace(",", ".");
 
-        if (decimal.TryParse(valorStr, System.Globalization.NumberStyles.Any, 
+        if (decimal.TryParse(valorStr, System.Globalization.NumberStyles.Any,
             System.Globalization.CultureInfo.InvariantCulture, out var valor))
             return valor;
 
@@ -525,7 +587,6 @@ public static class LicitacoesTools
 
         try
         {
-            // Clica na aba Arquivos
             var abaArquivos = await page.QuerySelectorAsync("text=Arquivos");
             if (abaArquivos != null)
             {
@@ -533,7 +594,6 @@ public static class LicitacoesTools
                 await page.WaitForTimeoutAsync(1000);
             }
 
-            // Extrai dados da tabela de arquivos
             var script = @"
                 (() => {
                     const arquivos = [];
@@ -570,7 +630,6 @@ public static class LicitacoesTools
 
         try
         {
-            // Clica na aba Itens
             var abaItens = await page.QuerySelectorAsync("text=Itens");
             if (abaItens != null)
             {
@@ -578,7 +637,6 @@ public static class LicitacoesTools
                 await page.WaitForTimeoutAsync(1000);
             }
 
-            // Extrai dados da tabela de itens
             var script = @"
                 (() => {
                     const itens = [];

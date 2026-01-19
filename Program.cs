@@ -64,6 +64,12 @@ class Program
             try { return Results.Content(await LicitacoesTools.BuscarListaLicitacoes(api, pagina ?? 1, itens ?? 100), "application/json"); }
             catch (Exception ex) { return Results.Problem(ex.Message); }
         });
+        
+        // Endpoint para buscar por número de processo
+        app.MapGet("/api/buscar", async (string? processo, string? objeto, ApiService api) => {
+            try { return Results.Content(await LicitacoesTools.BuscarPorFiltro(api, processo, objeto), "application/json"); }
+            catch (Exception ex) { return Results.Problem(ex.Message); }
+        });
 
         Console.WriteLine("API HTTP em http://0.0.0.0:8080");
         await app.RunAsync();
@@ -519,6 +525,87 @@ public static class LicitacoesTools
             }
 
             return JsonSerializer.Serialize(new { pagina, itens_por_pagina, total, licitacoes = lics }, new JsonSerializerOptions { WriteIndented = true });
+        }
+        catch (Exception ex)
+        {
+            return JsonSerializer.Serialize(new { erro = ex.Message });
+        }
+    }
+
+    [McpServerTool, Description("Busca licitações por número de processo ou termo no objeto.")]
+    public static async Task<string> BuscarPorFiltro(ApiService api, [Description("Número do processo (ex: PMC.2025.00124491-59)")] string? processo = null, [Description("Termo para buscar no objeto")] string? objeto = null)
+    {
+        try
+        {
+            // Monta os filtros
+            var filtros = new List<string>();
+            
+            if (!string.IsNullOrWhiteSpace(processo))
+            {
+                // Busca exata ou parcial por processo
+                filtros.Add($"filter[pncp_numero_processo][cont]={Uri.EscapeDataString(processo)}");
+            }
+            
+            if (!string.IsNullOrWhiteSpace(objeto))
+            {
+                // Busca parcial no objeto
+                filtros.Add($"filter[pncp_objeto_compra][cont]={Uri.EscapeDataString(objeto)}");
+            }
+            
+            if (filtros.Count == 0)
+            {
+                return JsonSerializer.Serialize(new { erro = "Informe pelo menos um filtro: processo ou objeto" });
+            }
+            
+            var queryString = string.Join("&", filtros);
+            var doc = await api.GetAsync($"/compras?{queryString}&page[number]=1&page[size]=100&sort=-id&include=modalidade,unidade,situacao_compra");
+            
+            if (doc == null)
+                return JsonSerializer.Serialize(new { erro = "Sem resposta da API" });
+
+            var lics = new List<LicitacaoResumo>();
+            var root = doc.RootElement;
+            
+            if (root.TryGetProperty("data", out var data))
+            {
+                foreach (var item in data.EnumerateArray())
+                {
+                    var id = GetInt(item, "id");
+                    
+                    var lic = new LicitacaoResumo
+                    {
+                        Id = id,
+                        NumeroCompra = GetString(item, "pncp_numero_compra"),
+                        Processo = GetString(item, "pncp_numero_processo"),
+                        Objeto = GetString(item, "pncp_objeto_compra"),
+                        Status = GetString(item, "status"),
+                        Url = $"https://campinas.sp.gov.br/licitacoes/edital/{id}"
+                    };
+
+                    if (item.TryGetProperty("modalidade", out var mod))
+                        lic.Modalidade = GetString(mod, "item_titulo");
+                    
+                    if (item.TryGetProperty("unidade", out var unid))
+                        lic.Unidade = GetString(unid, "pncp_nome_unidade");
+                    
+                    if (item.TryGetProperty("situacao_compra", out var sit))
+                        lic.Status = GetString(sit, "item_titulo");
+
+                    lics.Add(lic);
+                }
+            }
+
+            int total = 0;
+            if (root.TryGetProperty("meta", out var meta))
+            {
+                total = GetInt(meta, "total_count");
+            }
+
+            return JsonSerializer.Serialize(new { 
+                filtros = new { processo, objeto },
+                total, 
+                licitacoes = lics 
+            }, new JsonSerializerOptions { WriteIndented = true });
         }
         catch (Exception ex)
         {

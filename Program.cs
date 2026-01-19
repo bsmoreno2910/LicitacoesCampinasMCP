@@ -538,12 +538,16 @@ public static class LicitacoesTools
                     lic.Arquivos = new List<ArquivoData>();
                     foreach (var arq in arqsData.EnumerateArray())
                     {
+                        var arquivoId = GetInt(arq, "id");
+                        // Gera o link de download através da nossa API
+                        var linkDownload = $"https://srvs-mcp-licitacoes-campinas.vtc.dev.br/api/compra/{edital_id}/arquivo/{arquivoId}/download";
+                        
                         lic.Arquivos.Add(new ArquivoData
                         {
-                            Id = GetInt(arq, "id"),
+                            Id = arquivoId,
                             TipoDocumento = GetInt(arq, "pncp_tipo_documento"),
                             Titulo = GetString(arq, "pncp_titulo_documento"),
-                            LinkPncp = GetString(arq, "pncp_link"),
+                            LinkPncp = linkDownload,
                             CreatedAt = GetString(arq, "created_at")
                         });
                     }

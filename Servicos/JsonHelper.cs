@@ -1,0 +1,101 @@
+using System.Globalization;
+using System.Text.Json;
+
+namespace LicitacoesCampinasMCP.Servicos;
+
+/// <summary>
+/// Métodos utilitários para parsing de JSON.
+/// </summary>
+public static class JsonHelper
+{
+    /// <summary>
+    /// Obtém uma string de um JsonElement.
+    /// </summary>
+    public static string? GetString(JsonElement el, string prop)
+    {
+        try 
+        { 
+            return el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null 
+                ? v.GetString() 
+                : null; 
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Obtém um inteiro de um JsonElement.
+    /// </summary>
+    public static int GetInt(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.Number) return v.GetInt32();
+                if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var i)) return i;
+            }
+            return 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// Obtém um inteiro nullable de um JsonElement.
+    /// </summary>
+    public static int? GetNullableInt(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.Number) return v.GetInt32();
+                if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var i)) return i;
+            }
+            return null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Obtém um decimal de um JsonElement, tratando formato brasileiro (48.000,00).
+    /// </summary>
+    public static decimal GetDecimal(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.Number) return v.GetDecimal();
+                if (v.ValueKind == JsonValueKind.String)
+                {
+                    var s = v.GetString()?.Replace(".", "").Replace(",", ".");
+                    return decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d : 0;
+                }
+            }
+            return 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>
+    /// Obtém um boolean de um JsonElement.
+    /// </summary>
+    public static bool GetBool(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.True) return true;
+                if (v.ValueKind == JsonValueKind.False) return false;
+                if (v.ValueKind == JsonValueKind.String)
+                {
+                    var s = v.GetString()?.ToLower();
+                    return s == "true" || s == "1" || s == "sim" || s == "yes";
+                }
+            }
+            return false;
+        }
+        catch { return false; }
+    }
+}

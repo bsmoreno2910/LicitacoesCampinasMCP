@@ -6,7 +6,7 @@ namespace LicitacoesCampinasMCP.Servicos;
 
 /// <summary>
 /// Serviço responsável por fazer requisições à API de contratações de Campinas.
-/// Gerencia múltiplos contextos de API para suportar requisições simultâneas.
+/// Utiliza o BrowserPoolService para todas as operações com Playwright.
 /// </summary>
 public class CampinasApiService : IAsyncDisposable
 {
@@ -14,7 +14,7 @@ public class CampinasApiService : IAsyncDisposable
     private readonly ApiKeyService _apiKeyService;
     private readonly SemaphoreSlim _contextLock = new(1, 1);
     
-    private IPlaywright? _playwright;
+    private BrowserSession? _dedicatedSession;
     private IAPIRequestContext? _sharedApiContext;
     private string? _currentApiKey;
     
@@ -27,27 +27,7 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Inicializa o Playwright para requisições de API.
-    /// </summary>
-    private async Task EnsurePlaywrightAsync()
-    {
-        if (_playwright != null) return;
-
-        await _contextLock.WaitAsync();
-        try
-        {
-            if (_playwright != null) return;
-            Console.WriteLine("[CampinasApi] Inicializando Playwright...");
-            _playwright = await Playwright.CreateAsync();
-        }
-        finally
-        {
-            _contextLock.Release();
-        }
-    }
-
-    /// <summary>
-    /// Obtém ou cria um contexto de API com a chave atual.
+    /// Obtém ou cria um contexto de API com a chave atual usando o BrowserPoolService.
     /// </summary>
     private async Task<IAPIRequestContext> GetApiContextAsync(CancellationToken cancellationToken = default)
     {
@@ -56,18 +36,28 @@ public class CampinasApiService : IAsyncDisposable
         await _contextLock.WaitAsync(cancellationToken);
         try
         {
-            // Se a chave mudou, recria o contexto
-            if (_sharedApiContext == null || _currentApiKey != apiKey)
+            // Se a chave mudou ou não temos sessão, recria o contexto
+            if (_sharedApiContext == null || _currentApiKey != apiKey || _dedicatedSession == null || !await _dedicatedSession.IsValidAsync())
             {
-                await EnsurePlaywrightAsync();
-                
-                if (_sharedApiContext != null)
+                // Libera sessão anterior se existir
+                if (_dedicatedSession != null)
                 {
-                    await _sharedApiContext.DisposeAsync();
+                    if (_sharedApiContext != null)
+                    {
+                        await _sharedApiContext.DisposeAsync();
+                        _sharedApiContext = null;
+                    }
+                    await _browserPool.ReleaseSessionAsync(_dedicatedSession);
+                    _dedicatedSession = null;
                 }
 
-                Console.WriteLine("[CampinasApi] Criando contexto de API...");
-                _sharedApiContext = await _playwright!.APIRequest.NewContextAsync(new APIRequestNewContextOptions
+                // Adquire nova sessão do pool
+                Console.WriteLine("[CampinasApi] Adquirindo sessão do BrowserPool...");
+                _dedicatedSession = await _browserPool.AcquireSessionAsync(cancellationToken);
+
+                // Cria contexto de API usando o Playwright da sessão
+                Console.WriteLine("[CampinasApi] Criando contexto de API via Browserless...");
+                _sharedApiContext = await _dedicatedSession.Playwright.APIRequest.NewContextAsync(new APIRequestNewContextOptions
                 {
                     BaseURL = BASE_URL,
                     ExtraHTTPHeaders = new Dictionary<string, string>
@@ -82,7 +72,7 @@ public class CampinasApiService : IAsyncDisposable
                 _currentApiKey = apiKey;
             }
 
-            return _sharedApiContext;
+            return _sharedApiContext!;
         }
         finally
         {
@@ -91,13 +81,13 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Faz uma requisição GET à API de Campinas.
+    /// Faz uma requisição GET à API de Campinas via Browserless.
     /// </summary>
     public async Task<JsonDocument?> GetAsync(string endpoint, CancellationToken cancellationToken = default)
     {
         var apiContext = await GetApiContextAsync(cancellationToken);
         
-        Console.WriteLine($"[CampinasApi] GET {endpoint}");
+        Console.WriteLine($"[CampinasApi] GET {endpoint} (via Browserless)");
         var response = await apiContext.GetAsync(endpoint);
         
         // Se a chave expirou, tenta renovar
@@ -106,8 +96,8 @@ public class CampinasApiService : IAsyncDisposable
             Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
             _apiKeyService.InvalidateApiKey();
             
-            // Recria o contexto com a nova chave
-            _sharedApiContext = null;
+            // Força recriação do contexto
+            _currentApiKey = null;
             apiContext = await GetApiContextAsync(cancellationToken);
             response = await apiContext.GetAsync(endpoint);
         }
@@ -123,14 +113,14 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Faz download de um arquivo da API de Campinas.
+    /// Faz download de um arquivo da API de Campinas via Browserless.
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoAsync(string compraId, string arquivoId, CancellationToken cancellationToken = default)
     {
         var apiContext = await GetApiContextAsync(cancellationToken);
         
         var endpoint = $"/compras/{compraId}/arquivos/{arquivoId}/blob";
-        Console.WriteLine($"[CampinasApi] DOWNLOAD {endpoint}");
+        Console.WriteLine($"[CampinasApi] DOWNLOAD {endpoint} (via Browserless)");
         
         var response = await apiContext.GetAsync(endpoint);
         
@@ -140,7 +130,7 @@ public class CampinasApiService : IAsyncDisposable
             Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
             _apiKeyService.InvalidateApiKey();
             
-            _sharedApiContext = null;
+            _currentApiKey = null;
             apiContext = await GetApiContextAsync(cancellationToken);
             response = await apiContext.GetAsync(endpoint);
         }
@@ -189,11 +179,25 @@ public class CampinasApiService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_sharedApiContext != null)
+        await _contextLock.WaitAsync();
+        try
         {
-            await _sharedApiContext.DisposeAsync();
+            if (_sharedApiContext != null)
+            {
+                await _sharedApiContext.DisposeAsync();
+                _sharedApiContext = null;
+            }
+            
+            if (_dedicatedSession != null)
+            {
+                await _browserPool.ReleaseSessionAsync(_dedicatedSession);
+                _dedicatedSession = null;
+            }
         }
-        _playwright?.Dispose();
-        _contextLock.Dispose();
+        finally
+        {
+            _contextLock.Release();
+            _contextLock.Dispose();
+        }
     }
 }

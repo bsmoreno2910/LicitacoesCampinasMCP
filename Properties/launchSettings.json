@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "API": {
+      "commandName": "Project",
+      "commandLineArgs": "$env:RUN_AS_API=\"true\"",
+      "launchUrl": "swagger/index.html",
+      "environmentVariables": {
+        "RUN_AS_API": "true",
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:12001;http://localhost:12000",
+      "dotnetRunMessages": true,
+      "nativeDebugging": false
+    }
+  }
+}

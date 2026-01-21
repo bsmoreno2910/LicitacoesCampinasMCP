@@ -7,7 +7,6 @@ namespace LicitacoesCampinasMCP.Servicos;
 /// <summary>
 /// Serviço responsável por fazer requisições à API de contratações de Campinas.
 /// Gerencia múltiplos contextos de API para suportar requisições simultâneas.
-/// Todas as requisições passam pelo proxy configurado.
 /// </summary>
 public class CampinasApiService : IAsyncDisposable
 {
@@ -20,18 +19,12 @@ public class CampinasApiService : IAsyncDisposable
     private string? _currentApiKey;
     
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
-    private const string DEFAULT_PROXY_SERVER = "http://proxy-server.vtc.dev.br:3128";
 
     public CampinasApiService(BrowserPoolService browserPool, ApiKeyService apiKeyService)
     {
         _browserPool = browserPool;
         _apiKeyService = apiKeyService;
     }
-
-    /// <summary>
-    /// Obtém a URL do proxy configurado.
-    /// </summary>
-    private string ProxyServer => _browserPool.ProxyServer ?? DEFAULT_PROXY_SERVER;
 
     /// <summary>
     /// Inicializa o Playwright para requisições de API.
@@ -44,7 +37,7 @@ public class CampinasApiService : IAsyncDisposable
         try
         {
             if (_playwright != null) return;
-            Console.WriteLine($"[CampinasApi] Inicializando Playwright com proxy: {ProxyServer}");
+            Console.WriteLine("[CampinasApi] Inicializando Playwright...");
             _playwright = await Playwright.CreateAsync();
         }
         finally
@@ -54,7 +47,7 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Obtém ou cria um contexto de API com a chave atual e proxy configurado.
+    /// Obtém ou cria um contexto de API com a chave atual.
     /// </summary>
     private async Task<IAPIRequestContext> GetApiContextAsync(CancellationToken cancellationToken = default)
     {
@@ -73,11 +66,10 @@ public class CampinasApiService : IAsyncDisposable
                     await _sharedApiContext.DisposeAsync();
                 }
 
-                Console.WriteLine($"[CampinasApi] Criando contexto de API com proxy: {ProxyServer}");
+                Console.WriteLine("[CampinasApi] Criando contexto de API...");
                 _sharedApiContext = await _playwright!.APIRequest.NewContextAsync(new APIRequestNewContextOptions
                 {
                     BaseURL = BASE_URL,
-                    Proxy = new Proxy { Server = ProxyServer },
                     ExtraHTTPHeaders = new Dictionary<string, string>
                     {
                         ["x-api-key"] = apiKey,
@@ -99,13 +91,13 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Faz uma requisição GET à API de Campinas (via proxy).
+    /// Faz uma requisição GET à API de Campinas.
     /// </summary>
     public async Task<JsonDocument?> GetAsync(string endpoint, CancellationToken cancellationToken = default)
     {
         var apiContext = await GetApiContextAsync(cancellationToken);
         
-        Console.WriteLine($"[CampinasApi] GET {endpoint} (via proxy)");
+        Console.WriteLine($"[CampinasApi] GET {endpoint}");
         var response = await apiContext.GetAsync(endpoint);
         
         // Se a chave expirou, tenta renovar
@@ -131,14 +123,14 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Faz download de um arquivo da API de Campinas (via proxy).
+    /// Faz download de um arquivo da API de Campinas.
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoAsync(string compraId, string arquivoId, CancellationToken cancellationToken = default)
     {
         var apiContext = await GetApiContextAsync(cancellationToken);
         
         var endpoint = $"/compras/{compraId}/arquivos/{arquivoId}/blob";
-        Console.WriteLine($"[CampinasApi] DOWNLOAD {endpoint} (via proxy)");
+        Console.WriteLine($"[CampinasApi] DOWNLOAD {endpoint}");
         
         var response = await apiContext.GetAsync(endpoint);
         

@@ -11,7 +11,6 @@ public class BrowserPoolService : IAsyncDisposable
 {
     private readonly int _maxConnections;
     private readonly string _browserlessUrl;
-    private readonly string _proxyServer;
     private readonly SemaphoreSlim _poolSemaphore;
     private readonly ConcurrentBag<BrowserSession> _availableSessions;
     private readonly ConcurrentDictionary<Guid, BrowserSession> _activeSessions;
@@ -19,23 +18,14 @@ public class BrowserPoolService : IAsyncDisposable
     private bool _initialized;
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
-    // Configuração padrão do proxy
-    private const string DEFAULT_PROXY_SERVER = "http://proxy-server.vtc.dev.br:3128";
-
-    public BrowserPoolService(int maxConnections = 20, string? browserlessUrl = null, string? proxyServer = null)
+    public BrowserPoolService(int maxConnections = 20, string? browserlessUrl = null)
     {
         _maxConnections = maxConnections;
         _browserlessUrl = browserlessUrl ?? "wss://browserless.vtc.dev.br/?token=78e69a4812450ad4e2e657ee2cdf90b5";
-        _proxyServer = proxyServer ?? DEFAULT_PROXY_SERVER;
         _poolSemaphore = new SemaphoreSlim(maxConnections, maxConnections);
         _availableSessions = new ConcurrentBag<BrowserSession>();
         _activeSessions = new ConcurrentDictionary<Guid, BrowserSession>();
     }
-
-    /// <summary>
-    /// Obtém a URL do proxy configurado.
-    /// </summary>
-    public string ProxyServer => _proxyServer;
 
     /// <summary>
     /// Inicializa o Playwright se ainda não foi inicializado.
@@ -50,7 +40,6 @@ public class BrowserPoolService : IAsyncDisposable
             if (_initialized) return;
             
             Console.WriteLine("[BrowserPool] Inicializando Playwright...");
-            Console.WriteLine($"[BrowserPool] Proxy configurado: {_proxyServer}");
             _playwright = await Playwright.CreateAsync();
             _initialized = true;
             Console.WriteLine("[BrowserPool] Playwright inicializado com sucesso.");
@@ -147,7 +136,7 @@ public class BrowserPoolService : IAsyncDisposable
             Timeout = 60000
         });
 
-        return new BrowserSession(browser, _playwright, _proxyServer);
+        return new BrowserSession(browser, _playwright);
     }
 
     /// <summary>
@@ -160,8 +149,7 @@ public class BrowserPoolService : IAsyncDisposable
             MaxConnections = _maxConnections,
             AvailableSessions = _availableSessions.Count,
             ActiveSessions = _activeSessions.Count,
-            WaitingRequests = _maxConnections - _poolSemaphore.CurrentCount - _activeSessions.Count,
-            ProxyServer = _proxyServer
+            WaitingRequests = _maxConnections - _poolSemaphore.CurrentCount - _activeSessions.Count
         };
     }
 
@@ -198,7 +186,6 @@ public class BrowserSession : IAsyncDisposable
     public Guid Id { get; } = Guid.NewGuid();
     public IBrowser Browser { get; }
     public IPlaywright Playwright { get; }
-    public string ProxyServer { get; }
     public DateTime CreatedAt { get; } = DateTime.UtcNow;
     public DateTime LastUsedAt { get; private set; } = DateTime.UtcNow;
     public bool IsActive { get; private set; }
@@ -206,11 +193,10 @@ public class BrowserSession : IAsyncDisposable
     private IAPIRequestContext? _apiContext;
     private readonly SemaphoreSlim _contextLock = new(1, 1);
 
-    public BrowserSession(IBrowser browser, IPlaywright playwright, string proxyServer)
+    public BrowserSession(IBrowser browser, IPlaywright playwright)
     {
         Browser = browser;
         Playwright = playwright;
-        ProxyServer = proxyServer;
         IsActive = true;
     }
 
@@ -240,7 +226,7 @@ public class BrowserSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// Obtém ou cria um contexto de API com a chave especificada e proxy configurado.
+    /// Obtém ou cria um contexto de API com a chave especificada.
     /// </summary>
     public async Task<IAPIRequestContext> GetOrCreateApiContextAsync(string apiKey, string baseUrl)
     {
@@ -255,7 +241,6 @@ public class BrowserSession : IAsyncDisposable
             _apiContext = await Playwright.APIRequest.NewContextAsync(new APIRequestNewContextOptions
             {
                 BaseURL = baseUrl,
-                Proxy = new Proxy { Server = ProxyServer },
                 ExtraHTTPHeaders = new Dictionary<string, string>
                 {
                     ["x-api-key"] = apiKey,
@@ -320,5 +305,4 @@ public class PoolStats
     public int AvailableSessions { get; set; }
     public int ActiveSessions { get; set; }
     public int WaitingRequests { get; set; }
-    public string? ProxyServer { get; set; }
 }

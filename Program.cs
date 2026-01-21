@@ -14,7 +14,6 @@ class Program
 {
     // Configurações
     private const string BROWSERLESS_URL = "wss://browserless.vtc.dev.br/?token=78e69a4812450ad4e2e657ee2cdf90b5";
-    private const string PROXY_SERVER = "http://proxy-server.vtc.dev.br:3128";
     private const int MAX_CONNECTIONS = 20;
 
     static async Task Main(string[] args)
@@ -70,7 +69,6 @@ class Program
         Console.WriteLine("===========================================");
         Console.WriteLine("  Licitações Campinas API v2.0");
         Console.WriteLine($"  Pool de Browsers: {MAX_CONNECTIONS} conexões simultâneas");
-        Console.WriteLine($"  Proxy: {PROXY_SERVER}");
         Console.WriteLine("  Servidor: http://0.0.0.0:8080");
         Console.WriteLine("===========================================");
         
@@ -82,11 +80,10 @@ class Program
     /// </summary>
     static void ConfigureServices(IServiceCollection services)
     {
-        // Pool de browsers (20 conexões simultâneas) com proxy
+        // Pool de browsers (20 conexões simultâneas)
         services.AddSingleton<BrowserPoolService>(sp => new BrowserPoolService(
             maxConnections: MAX_CONNECTIONS,
-            browserlessUrl: BROWSERLESS_URL,
-            proxyServer: PROXY_SERVER
+            browserlessUrl: BROWSERLESS_URL
         ));
         
         // Serviços

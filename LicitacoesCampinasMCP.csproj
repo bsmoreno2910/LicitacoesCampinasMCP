@@ -18,6 +18,9 @@
     
     <!-- Swagger para documentação da API -->
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
+    
+    <!-- Magic Bytes Validator para identificar tipo de arquivo -->
+    <PackageReference Include="MagicBytesValidator" Version="2.1.6" />
   </ItemGroup>
 
 </Project>

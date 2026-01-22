@@ -2,18 +2,22 @@ using LicitacoesCampinasMCP.Dominio;
 using Microsoft.Playwright;
 using System.Text.Json;
 using System.Net.Http;
+using MagicBytesValidator.Services;
+using MagicBytesValidator.Services.Streams;
 
 namespace LicitacoesCampinasMCP.Servicos;
 
 /// <summary>
 /// Serviço responsável por fazer requisições à API de contratações de Campinas.
 /// Usa Playwright para requisições de API e HttpClient para downloads de arquivos grandes.
+/// Utiliza MagicBytesValidator para identificar o tipo correto de arquivo pelos magic bytes.
 /// </summary>
 public class CampinasApiService : IAsyncDisposable
 {
     private readonly BrowserPoolService _browserPool;
     private readonly ApiKeyService _apiKeyService;
     private readonly HttpClient _httpClient;
+    private readonly StreamFileTypeProvider _fileTypeProvider;
     
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
     private const int REQUEST_TIMEOUT_MS = 300000; // 5 minutos
@@ -22,6 +26,7 @@ public class CampinasApiService : IAsyncDisposable
     {
         _browserPool = browserPool;
         _apiKeyService = apiKeyService;
+        _fileTypeProvider = new StreamFileTypeProvider();
         
         // HttpClient para downloads de arquivos grandes
         var handler = new HttpClientHandler
@@ -116,7 +121,36 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Identifica a extensão do arquivo usando MagicBytesValidator.
+    /// Analisa os magic bytes do arquivo para determinar o tipo real.
+    /// </summary>
+    private async Task<(string extension, string mimeType)> IdentifyFileTypeAsync(byte[] bytes, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var stream = new MemoryStream(bytes);
+            var fileType = await _fileTypeProvider.TryFindUnambiguousAsync(stream, cancellationToken);
+            
+            if (fileType != null)
+            {
+                var extension = fileType.Extensions.FirstOrDefault() ?? "";
+                var mimeType = fileType.MimeTypes.FirstOrDefault() ?? "application/octet-stream";
+                
+                Console.WriteLine($"[MagicBytes] Tipo identificado: {mimeType}, extensão: .{extension}");
+                return (extension, mimeType);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MagicBytes] Erro ao identificar tipo: {ex.Message}");
+        }
+        
+        return ("", "application/octet-stream");
+    }
+
+    /// <summary>
     /// Faz download de um arquivo da API de Campinas usando HttpClient (para arquivos grandes).
+    /// Usa MagicBytesValidator para identificar a extensão correta do arquivo.
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoAsync(string compraId, string arquivoId, CancellationToken cancellationToken = default)
     {
@@ -148,9 +182,16 @@ public class CampinasApiService : IAsyncDisposable
             throw new Exception($"Erro ao baixar arquivo: {(int)response.StatusCode} - {errorBody}");
         }
 
-        // Lê o arquivo como stream para evitar problemas de memória
+        // Lê o arquivo como bytes
         var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        var contentType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+        
+        // Identifica o tipo real do arquivo usando magic bytes
+        var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
+        
+        // Usa o content-type detectado pelos magic bytes, ou fallback para o header
+        var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
+            ? detectedMimeType
+            : response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         
         // Tenta extrair nome do arquivo do header content-disposition
         var fileName = $"arquivo_{arquivoId}";
@@ -167,21 +208,11 @@ public class CampinasApiService : IAsyncDisposable
             }
         }
         
-        // Adiciona extensão baseada no content-type se não tiver
-        if (!fileName.Contains("."))
+        // Adiciona extensão detectada pelos magic bytes se não tiver extensão
+        if (!fileName.Contains(".") && !string.IsNullOrEmpty(detectedExtension))
         {
-            fileName += contentType switch
-            {
-                "application/pdf" => ".pdf",
-                "image/jpeg" => ".jpg",
-                "image/png" => ".png",
-                "application/zip" => ".zip",
-                "application/msword" => ".doc",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
-                "application/vnd.ms-excel" => ".xls",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
-                _ => ""
-            };
+            fileName += $".{detectedExtension}";
+            Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
         }
 
         return new ArquivoDownload
@@ -194,6 +225,7 @@ public class CampinasApiService : IAsyncDisposable
 
     /// <summary>
     /// Faz download de um arquivo de empenho da API de Campinas usando HttpClient.
+    /// Usa MagicBytesValidator para identificar a extensão correta do arquivo.
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoEmpenhoAsync(string compraId, string empenhoId, string arquivoId, CancellationToken cancellationToken = default)
     {
@@ -225,7 +257,13 @@ public class CampinasApiService : IAsyncDisposable
         }
 
         var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        var contentType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+        
+        // Identifica o tipo real do arquivo usando magic bytes
+        var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
+        
+        var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
+            ? detectedMimeType
+            : response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         
         var fileName = $"empenho_{empenhoId}_arquivo_{arquivoId}";
         if (response.Content.Headers.ContentDisposition != null)
@@ -241,16 +279,11 @@ public class CampinasApiService : IAsyncDisposable
             }
         }
         
-        if (!fileName.Contains("."))
+        // Adiciona extensão detectada pelos magic bytes se não tiver extensão
+        if (!fileName.Contains(".") && !string.IsNullOrEmpty(detectedExtension))
         {
-            fileName += contentType switch
-            {
-                "application/pdf" => ".pdf",
-                "image/jpeg" => ".jpg",
-                "image/png" => ".png",
-                "application/zip" => ".zip",
-                _ => ""
-            };
+            fileName += $".{detectedExtension}";
+            Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
         }
 
         return new ArquivoDownload
@@ -264,6 +297,7 @@ public class CampinasApiService : IAsyncDisposable
     /// <summary>
     /// Faz download direto do PDF de um empenho da API de Campinas usando HttpClient.
     /// O endpoint /compras/{compraId}/empenhos/{empenhoId} retorna diretamente o arquivo PDF.
+    /// Usa MagicBytesValidator para identificar a extensão correta do arquivo.
     /// </summary>
     public async Task<ArquivoDownload> DownloadEmpenhoAsync(string compraId, string empenhoId, CancellationToken cancellationToken = default)
     {
@@ -295,9 +329,15 @@ public class CampinasApiService : IAsyncDisposable
         }
 
         var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        var contentType = response.Content.Headers.ContentType?.MediaType ?? "application/pdf";
         
-        var fileName = $"empenho_{empenhoId}.pdf";
+        // Identifica o tipo real do arquivo usando magic bytes
+        var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
+        
+        var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
+            ? detectedMimeType
+            : response.Content.Headers.ContentType?.MediaType ?? "application/pdf";
+        
+        var fileName = $"empenho_{empenhoId}";
         if (response.Content.Headers.ContentDisposition != null)
         {
             var cd = response.Content.Headers.ContentDisposition;
@@ -311,9 +351,19 @@ public class CampinasApiService : IAsyncDisposable
             }
         }
         
+        // Adiciona extensão detectada pelos magic bytes se não tiver extensão
         if (!fileName.Contains("."))
         {
-            fileName += ".pdf";
+            if (!string.IsNullOrEmpty(detectedExtension))
+            {
+                fileName += $".{detectedExtension}";
+                Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
+            }
+            else
+            {
+                // Fallback para .pdf se não conseguir detectar
+                fileName += ".pdf";
+            }
         }
 
         return new ArquivoDownload

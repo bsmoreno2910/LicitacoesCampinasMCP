@@ -98,4 +98,27 @@ public static class JsonHelper
         }
         catch { return false; }
     }
+
+    /// <summary>
+    /// Obtém um boolean nullable de um JsonElement.
+    /// </summary>
+    public static bool? GetNullableBool(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.True) return true;
+                if (v.ValueKind == JsonValueKind.False) return false;
+                if (v.ValueKind == JsonValueKind.String)
+                {
+                    var s = v.GetString()?.ToLower();
+                    if (s == "true" || s == "1" || s == "sim" || s == "yes") return true;
+                    if (s == "false" || s == "0" || s == "nao" || s == "no") return false;
+                }
+            }
+            return null;
+        }
+        catch { return null; }
+    }
 }

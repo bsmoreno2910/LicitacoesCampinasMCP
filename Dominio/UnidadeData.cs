@@ -10,9 +10,21 @@ public class UnidadeData
     [JsonPropertyName("id")] 
     public int Id { get; set; }
     
-    [JsonPropertyName("codigo")] 
-    public string? Codigo { get; set; }
+    [JsonPropertyName("pncp_codigo_IBGE")] 
+    public string? PncpCodigoIBGE { get; set; }
     
-    [JsonPropertyName("nome")] 
-    public string? Nome { get; set; }
+    [JsonPropertyName("pncp_codigo_unidade")] 
+    public string? PncpCodigoUnidade { get; set; }
+    
+    [JsonPropertyName("pncp_nome_unidade")] 
+    public string? PncpNomeUnidade { get; set; }
+    
+    [JsonPropertyName("orgao_id")] 
+    public int? OrgaoId { get; set; }
+    
+    [JsonPropertyName("created_at")] 
+    public string? CreatedAt { get; set; }
+    
+    [JsonPropertyName("updated_at")] 
+    public string? UpdatedAt { get; set; }
 }

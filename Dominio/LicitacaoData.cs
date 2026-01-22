@@ -10,38 +10,86 @@ public class LicitacaoData
     [JsonPropertyName("id")] 
     public int Id { get; set; }
     
-    [JsonPropertyName("numero_compra")] 
-    public string? NumeroCompra { get; set; }
+    [JsonPropertyName("pncp_ano_compra")] 
+    public int? PncpAnoCompra { get; set; }
     
-    [JsonPropertyName("processo")] 
-    public string? Processo { get; set; }
+    [JsonPropertyName("pncp_tipo_instrumento_convocatorio_id")] 
+    public int? PncpTipoInstrumentoConvocatorioId { get; set; }
     
-    [JsonPropertyName("objeto")] 
-    public string? Objeto { get; set; }
+    [JsonPropertyName("pncp_modalidade_id")] 
+    public int? PncpModalidadeId { get; set; }
     
-    [JsonPropertyName("informacao_complementar")] 
-    public string? InformacaoComplementar { get; set; }
+    [JsonPropertyName("pncp_modo_disputa_id")] 
+    public int? PncpModoDisputaId { get; set; }
     
-    [JsonPropertyName("data_abertura_proposta")] 
-    public string? DataAberturaProposta { get; set; }
+    [JsonPropertyName("pncp_numero_compra")] 
+    public string? PncpNumeroCompra { get; set; }
     
-    [JsonPropertyName("data_encerramento_proposta")] 
-    public string? DataEncerramentoProposta { get; set; }
+    [JsonPropertyName("pncp_numero_processo")] 
+    public string? PncpNumeroProcesso { get; set; }
     
-    [JsonPropertyName("link_sistema_origem")] 
-    public string? LinkSistemaOrigem { get; set; }
+    [JsonPropertyName("pncp_objeto_compra")] 
+    public string? PncpObjetoCompra { get; set; }
     
-    [JsonPropertyName("sequencial_compra")] 
-    public int? SequencialCompra { get; set; }
+    [JsonPropertyName("pncp_informacao_complementar")] 
+    public string? PncpInformacaoComplementar { get; set; }
+    
+    [JsonPropertyName("pncp_srp")] 
+    public bool? PncpSrp { get; set; }
+    
+    [JsonPropertyName("pncp_orcamento_sigiloso")] 
+    public bool? PncpOrcamentoSigiloso { get; set; }
+    
+    [JsonPropertyName("pncp_amparo_legal_id")] 
+    public int? PncpAmparoLegalId { get; set; }
+    
+    [JsonPropertyName("pncp_data_abertura_proposta")] 
+    public string? PncpDataAberturaProposta { get; set; }
+    
+    [JsonPropertyName("pncp_data_encerramento_proposta")] 
+    public string? PncpDataEncerramentoProposta { get; set; }
+    
+    [JsonPropertyName("pncp_codigo_unidade_compradora")] 
+    public string? PncpCodigoUnidadeCompradora { get; set; }
+    
+    [JsonPropertyName("pncp_link_sistema_origem")] 
+    public string? PncpLinkSistemaOrigem { get; set; }
+    
+    [JsonPropertyName("orgao_id")] 
+    public int? OrgaoId { get; set; }
+    
+    [JsonPropertyName("situacao")] 
+    public string? Situacao { get; set; }
+    
+    [JsonPropertyName("motivo_reprova")] 
+    public string? MotivoReprova { get; set; }
+    
+    [JsonPropertyName("retorno_pncp")] 
+    public string? RetornoPncp { get; set; }
+    
+    [JsonPropertyName("pncp_sequencial_compra")] 
+    public int? PncpSequencialCompra { get; set; }
+    
+    [JsonPropertyName("pncp_situacao_compra_id")] 
+    public int? PncpSituacaoCompraId { get; set; }
+    
+    [JsonPropertyName("pncp_justificativa")] 
+    public string? PncpJustificativa { get; set; }
+    
+    [JsonPropertyName("created_at")] 
+    public string? CreatedAt { get; set; }
+    
+    [JsonPropertyName("updated_at")] 
+    public string? UpdatedAt { get; set; }
+    
+    [JsonPropertyName("pncp_justificativa_presencial")] 
+    public string? PncpJustificativaPresencial { get; set; }
     
     [JsonPropertyName("numero_controle_pncp")] 
     public string? NumeroControlePncp { get; set; }
     
     [JsonPropertyName("status")] 
     public string? Status { get; set; }
-    
-    [JsonPropertyName("updated_at")] 
-    public string? UpdatedAt { get; set; }
     
     // Relacionamentos
     [JsonPropertyName("unidade")] 
@@ -61,6 +109,10 @@ public class LicitacaoData
     
     [JsonPropertyName("situacao_compra")] 
     public DominioData? SituacaoCompra { get; set; }
+    
+    // Histórico
+    [JsonPropertyName("compra_historicos")] 
+    public List<CompraHistoricoData>? CompraHistoricos { get; set; }
     
     // Valores calculados
     [JsonPropertyName("valor_total_estimado")] 

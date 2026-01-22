@@ -23,7 +23,7 @@ public class LicitacoesRepository
     public async Task<LicitacaoData?> BuscarPorIdAsync(string editalId, CancellationToken cancellationToken = default)
     {
         var compraDoc = await _apiService.GetAsync(
-            $"/compras/{editalId}?include=unidade,situacao_compra,modalidade,amparo_legal,instrumento_convocatorio,modo_disputa",
+            $"/compras/{editalId}?include=unidade,situacao_compra,modalidade,amparo_legal,instrumento_convocatorio,modo_disputa,compra_historicos.usuario",
             cancellationToken);
         
         if (compraDoc == null)
@@ -34,79 +34,109 @@ public class LicitacoesRepository
         var licitacao = new LicitacaoData
         {
             Id = JsonHelper.GetInt(root, "id"),
-            NumeroCompra = JsonHelper.GetString(root, "pncp_numero_compra"),
-            Processo = JsonHelper.GetString(root, "pncp_numero_processo"),
-            Objeto = JsonHelper.GetString(root, "pncp_objeto_compra"),
-            InformacaoComplementar = JsonHelper.GetString(root, "pncp_informacao_complementar"),
-            DataAberturaProposta = JsonHelper.GetString(root, "pncp_data_abertura_proposta"),
-            DataEncerramentoProposta = JsonHelper.GetString(root, "pncp_data_encerramento_proposta"),
-            LinkSistemaOrigem = JsonHelper.GetString(root, "pncp_link_sistema_origem"),
-            SequencialCompra = JsonHelper.GetInt(root, "pncp_sequencial_compra"),
+            PncpAnoCompra = JsonHelper.GetNullableInt(root, "pncp_ano_compra"),
+            PncpTipoInstrumentoConvocatorioId = JsonHelper.GetNullableInt(root, "pncp_tipo_instrumento_convocatorio_id"),
+            PncpModalidadeId = JsonHelper.GetNullableInt(root, "pncp_modalidade_id"),
+            PncpModoDisputaId = JsonHelper.GetNullableInt(root, "pncp_modo_disputa_id"),
+            PncpNumeroCompra = JsonHelper.GetString(root, "pncp_numero_compra"),
+            PncpNumeroProcesso = JsonHelper.GetString(root, "pncp_numero_processo"),
+            PncpObjetoCompra = JsonHelper.GetString(root, "pncp_objeto_compra"),
+            PncpInformacaoComplementar = JsonHelper.GetString(root, "pncp_informacao_complementar"),
+            PncpSrp = JsonHelper.GetNullableBool(root, "pncp_srp"),
+            PncpOrcamentoSigiloso = JsonHelper.GetNullableBool(root, "pncp_orcamento_sigiloso"),
+            PncpAmparoLegalId = JsonHelper.GetNullableInt(root, "pncp_amparo_legal_id"),
+            PncpDataAberturaProposta = JsonHelper.GetString(root, "pncp_data_abertura_proposta"),
+            PncpDataEncerramentoProposta = JsonHelper.GetString(root, "pncp_data_encerramento_proposta"),
+            PncpCodigoUnidadeCompradora = JsonHelper.GetString(root, "pncp_codigo_unidade_compradora"),
+            PncpLinkSistemaOrigem = JsonHelper.GetString(root, "pncp_link_sistema_origem"),
+            OrgaoId = JsonHelper.GetNullableInt(root, "orgao_id"),
+            Situacao = JsonHelper.GetString(root, "situacao"),
+            MotivoReprova = JsonHelper.GetString(root, "motivo_reprova"),
+            RetornoPncp = JsonHelper.GetString(root, "retorno_pncp"),
+            PncpSequencialCompra = JsonHelper.GetNullableInt(root, "pncp_sequencial_compra"),
+            PncpSituacaoCompraId = JsonHelper.GetNullableInt(root, "pncp_situacao_compra_id"),
+            PncpJustificativa = JsonHelper.GetString(root, "pncp_justificativa"),
+            CreatedAt = JsonHelper.GetString(root, "created_at"),
+            UpdatedAt = JsonHelper.GetString(root, "updated_at"),
+            PncpJustificativaPresencial = JsonHelper.GetString(root, "pncp_justificativa_presencial"),
             NumeroControlePncp = JsonHelper.GetString(root, "numero_controle_pncp"),
             Status = JsonHelper.GetString(root, "status"),
-            UpdatedAt = JsonHelper.GetString(root, "updated_at"),
             DataExtracao = DateTime.UtcNow.ToString("o")
         };
 
         // Unidade
-        if (root.TryGetProperty("unidade", out var unidade))
+        if (root.TryGetProperty("unidade", out var unidade) && unidade.ValueKind != JsonValueKind.Null)
         {
             licitacao.Unidade = new UnidadeData
             {
                 Id = JsonHelper.GetInt(unidade, "id"),
-                Codigo = JsonHelper.GetString(unidade, "pncp_codigo_unidade"),
-                Nome = JsonHelper.GetString(unidade, "pncp_nome_unidade")
+                PncpCodigoIBGE = JsonHelper.GetString(unidade, "pncp_codigo_IBGE"),
+                PncpCodigoUnidade = JsonHelper.GetString(unidade, "pncp_codigo_unidade"),
+                PncpNomeUnidade = JsonHelper.GetString(unidade, "pncp_nome_unidade"),
+                OrgaoId = JsonHelper.GetNullableInt(unidade, "orgao_id"),
+                CreatedAt = JsonHelper.GetString(unidade, "created_at"),
+                UpdatedAt = JsonHelper.GetString(unidade, "updated_at")
             };
         }
 
         // Modalidade
-        if (root.TryGetProperty("modalidade", out var modalidade))
+        if (root.TryGetProperty("modalidade", out var modalidade) && modalidade.ValueKind != JsonValueKind.Null)
         {
-            licitacao.Modalidade = new DominioData
-            {
-                Id = JsonHelper.GetInt(modalidade, "id"),
-                Titulo = JsonHelper.GetString(modalidade, "item_titulo")
-            };
+            licitacao.Modalidade = MapDominio(modalidade);
         }
 
         // Amparo Legal
-        if (root.TryGetProperty("amparo_legal", out var amparoLegal))
+        if (root.TryGetProperty("amparo_legal", out var amparoLegal) && amparoLegal.ValueKind != JsonValueKind.Null)
         {
-            licitacao.AmparoLegal = new DominioData
-            {
-                Id = JsonHelper.GetInt(amparoLegal, "id"),
-                Titulo = JsonHelper.GetString(amparoLegal, "item_titulo")
-            };
+            licitacao.AmparoLegal = MapDominio(amparoLegal);
         }
 
         // Instrumento Convocatório
-        if (root.TryGetProperty("instrumento_convocatorio", out var instrConv))
+        if (root.TryGetProperty("instrumento_convocatorio", out var instrConv) && instrConv.ValueKind != JsonValueKind.Null)
         {
-            licitacao.InstrumentoConvocatorio = new DominioData
-            {
-                Id = JsonHelper.GetInt(instrConv, "id"),
-                Titulo = JsonHelper.GetString(instrConv, "item_titulo")
-            };
+            licitacao.InstrumentoConvocatorio = MapDominio(instrConv);
         }
 
         // Modo de Disputa
-        if (root.TryGetProperty("modo_disputa", out var modoDisputa))
+        if (root.TryGetProperty("modo_disputa", out var modoDisputa) && modoDisputa.ValueKind != JsonValueKind.Null)
         {
-            licitacao.ModoDisputa = new DominioData
-            {
-                Id = JsonHelper.GetInt(modoDisputa, "id"),
-                Titulo = JsonHelper.GetString(modoDisputa, "item_titulo")
-            };
+            licitacao.ModoDisputa = MapDominio(modoDisputa);
         }
 
         // Situação da Compra
-        if (root.TryGetProperty("situacao_compra", out var sitCompra))
+        if (root.TryGetProperty("situacao_compra", out var sitCompra) && sitCompra.ValueKind != JsonValueKind.Null)
         {
-            licitacao.SituacaoCompra = new DominioData
+            licitacao.SituacaoCompra = MapDominio(sitCompra);
+        }
+
+        // Compra Históricos
+        if (root.TryGetProperty("compra_historicos", out var historicos) && historicos.ValueKind == JsonValueKind.Array)
+        {
+            licitacao.CompraHistoricos = new List<CompraHistoricoData>();
+            foreach (var hist in historicos.EnumerateArray())
             {
-                Id = JsonHelper.GetInt(sitCompra, "id"),
-                Titulo = JsonHelper.GetString(sitCompra, "item_titulo")
-            };
+                var historicoData = new CompraHistoricoData
+                {
+                    Id = JsonHelper.GetInt(hist, "id"),
+                    Descricao = JsonHelper.GetString(hist, "descricao"),
+                    CreatedAt = JsonHelper.GetString(hist, "created_at"),
+                    UpdatedAt = JsonHelper.GetString(hist, "updated_at"),
+                    CompraId = JsonHelper.GetNullableInt(hist, "compra_id")
+                };
+
+                // Usuario
+                if (hist.TryGetProperty("usuario", out var usuario) && usuario.ValueKind != JsonValueKind.Null)
+                {
+                    historicoData.Usuario = new UsuarioData
+                    {
+                        Id = JsonHelper.GetInt(usuario, "id"),
+                        Nome = JsonHelper.GetString(usuario, "nome"),
+                        Email = JsonHelper.GetString(usuario, "email")
+                    };
+                }
+
+                licitacao.CompraHistoricos.Add(historicoData);
+            }
         }
 
         // Busca itens
@@ -116,6 +146,26 @@ public class LicitacoesRepository
         await BuscarArquivosAsync(licitacao, editalId, cancellationToken);
 
         return licitacao;
+    }
+
+    /// <summary>
+    /// Mapeia um elemento JSON para DominioData com todos os campos.
+    /// </summary>
+    private DominioData MapDominio(JsonElement element)
+    {
+        return new DominioData
+        {
+            Id = JsonHelper.GetInt(element, "id"),
+            RefDominio = JsonHelper.GetString(element, "ref_dominio"),
+            DescricaoDominio = JsonHelper.GetString(element, "descricao_dominio"),
+            ItemId = JsonHelper.GetString(element, "item_id"),
+            ItemTitulo = JsonHelper.GetString(element, "item_titulo"),
+            ItemDescricao = JsonHelper.GetString(element, "item_descricao"),
+            Observacao = JsonHelper.GetString(element, "observacao"),
+            Ativo = JsonHelper.GetNullableBool(element, "ativo"),
+            CreatedAt = JsonHelper.GetString(element, "created_at"),
+            UpdatedAt = JsonHelper.GetString(element, "updated_at")
+        };
     }
 
     /// <summary>

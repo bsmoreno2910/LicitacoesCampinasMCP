@@ -616,7 +616,7 @@ public class LicitacoesRepository
                         Descricao = descricao,
                         Tipo = tipo,
                         Tamanho = tamanho,
-                        EmpenhoId = empenho.Id,
+                        EmpenhoId = empenho.IdEmpenho,
                         CreatedAt = createdAt,
                         UpdatedAt = updatedAt,
                         DownloadUrl = linkDownload
@@ -637,7 +637,7 @@ public class LicitacoesRepository
                         CreatedAt = createdAt,
                         UpdatedAt = updatedAt,
                         Origem = "empenho",
-                        EmpenhoId = empenho.Id,
+                        EmpenhoId = empenho.IdEmpenho,
                         NumeroEmpenho = numeroEmpenho
                     });
                 }

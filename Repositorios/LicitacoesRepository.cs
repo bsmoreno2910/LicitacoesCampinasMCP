@@ -568,8 +568,8 @@ public class LicitacoesRepository
                         }
                     }
 
-                    // Busca arquivos do empenho (se houver endpoint específico)
-                    // await BuscarArquivosEmpenhoAsync(licitacao, empenho, editalId, empenhoId.ToString(), numeroEmpenho, cancellationToken);
+                    // Busca arquivos do empenho e adiciona ao array principal de arquivos
+                    await BuscarArquivosEmpenhoAsync(licitacao, empenho, editalId, empenhoId.ToString(), numeroEmpenho, cancellationToken);
 
                     licitacao.Empenhos.Add(empenho);
                 }

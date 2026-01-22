@@ -246,7 +246,7 @@ public class LicitacoesRepository
     }
 
     /// <summary>
-    /// Busca os itens de uma licitação.
+    /// Busca os itens de uma licitação e seus resultados (valores homologados e fornecedor vencedor).
     /// </summary>
     private async Task BuscarItensAsync(LicitacaoData licitacao, string editalId, CancellationToken cancellationToken)
     {
@@ -264,13 +264,12 @@ public class LicitacoesRepository
                 
                 foreach (var item in itensData.EnumerateArray())
                 {
+                    var itemId = JsonHelper.GetInt(item, "id");
                     var valorTotalEstimado = JsonHelper.GetDecimal(item, "pncp_valor_total");
-                    var valorTotalHomologado = JsonHelper.GetNullableDecimal(item, "valor_total_homologado");
-                    var situacaoItem = JsonHelper.GetString(item, "situacao_item");
                     
                     var itemData = new ItemData
                     {
-                        Id = JsonHelper.GetInt(item, "id"),
+                        Id = itemId,
                         NumeroItem = JsonHelper.GetInt(item, "pncp_numero_item"),
                         CodigoReduzido = JsonHelper.GetString(item, "codigo_reduzido"),
                         Descricao = JsonHelper.GetString(item, "pncp_descricao"),
@@ -278,25 +277,21 @@ public class LicitacoesRepository
                         UnidadeMedida = JsonHelper.GetString(item, "pncp_unidade_medida"),
                         ValorUnitarioEstimado = JsonHelper.GetDecimal(item, "pncp_valor_unitario_estimado"),
                         ValorTotalEstimado = valorTotalEstimado,
-                        ValorUnitarioHomologado = JsonHelper.GetNullableDecimal(item, "valor_unitario_homologado"),
-                        ValorTotalHomologado = valorTotalHomologado,
-                        SituacaoItem = situacaoItem,
-                        CompraId = JsonHelper.GetNullableInt(item, "compra_id"),
+                        CompraId = JsonHelper.GetNullableInt(item, "compra_id") ?? int.Parse(editalId),
                         CreatedAt = JsonHelper.GetString(item, "created_at"),
                         UpdatedAt = JsonHelper.GetString(item, "updated_at")
                     };
+                    
+                    // Busca os resultados do item (valores homologados e fornecedor vencedor)
+                    await BuscarResultadoItemAsync(itemData, editalId, itemId.ToString(), cancellationToken);
+                    
                     licitacao.Itens.Add(itemData);
                     totalEstimado += valorTotalEstimado;
                     
-                    // Soma valor homologado se o item estiver homologado
-                    if (valorTotalHomologado.HasValue)
+                    // Soma valor homologado se disponível
+                    if (itemData.ValorTotalHomologado.HasValue)
                     {
-                        totalHomologado += valorTotalHomologado.Value;
-                    }
-                    else if (situacaoItem?.ToLower() == "homologado")
-                    {
-                        // Se não tem valor homologado mas está homologado, usa o valor estimado
-                        totalHomologado += valorTotalEstimado;
+                        totalHomologado += itemData.ValorTotalHomologado.Value;
                     }
                 }
                 
@@ -307,6 +302,49 @@ public class LicitacoesRepository
         catch (Exception ex) 
         { 
             Console.WriteLine($"[LicitacoesRepository] Erro ao buscar itens: {ex.Message}"); 
+        }
+    }
+
+    /// <summary>
+    /// Busca os resultados de um item (valores homologados e dados do fornecedor vencedor).
+    /// </summary>
+    private async Task BuscarResultadoItemAsync(ItemData itemData, string compraId, string itemId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var resultadoDoc = await _apiService.GetAsync(
+                $"/compras/{compraId}/itens/{itemId}/resultados?page[number]=1&page[size]=10",
+                cancellationToken);
+            
+            if (resultadoDoc != null && resultadoDoc.RootElement.TryGetProperty("data", out var resultadoData) && resultadoData.ValueKind == JsonValueKind.Array)
+            {
+                // Pega o primeiro resultado (fornecedor vencedor)
+                foreach (var resultado in resultadoData.EnumerateArray())
+                {
+                    itemData.QuantidadeHomologada = JsonHelper.GetNullableDecimal(resultado, "pncp_quantidade_homologada");
+                    itemData.ValorUnitarioHomologado = JsonHelper.GetNullableDecimal(resultado, "pncp_valor_unitario_homologado");
+                    itemData.ValorTotalHomologado = JsonHelper.GetNullableDecimal(resultado, "pncp_valor_total_homologado");
+                    itemData.PercentualDesconto = JsonHelper.GetNullableDecimal(resultado, "pncp_percentual_desconto");
+                    itemData.DataResultado = JsonHelper.GetString(resultado, "pncp_data_resultado");
+                    itemData.TipoFornecedor = JsonHelper.GetString(resultado, "pncp_tipo_pessoa_id");
+                    itemData.CnpjCpfFornecedor = JsonHelper.GetString(resultado, "pncp_ni_fornecedor");
+                    itemData.NomeFornecedor = JsonHelper.GetString(resultado, "pncp_nome_razao_social_fornecedor");
+                    itemData.PorteFornecedorId = JsonHelper.GetNullableInt(resultado, "pncp_porte_fornecedor_id");
+                    itemData.SituacaoItemResultadoId = JsonHelper.GetNullableInt(resultado, "pncp_situacao_compra_item_resultado_id");
+                    
+                    // Define situação do item baseado no resultado
+                    if (itemData.ValorTotalHomologado.HasValue && itemData.ValorTotalHomologado > 0)
+                    {
+                        itemData.SituacaoItem = "Homologado";
+                    }
+                    
+                    break; // Pega apenas o primeiro resultado (vencedor)
+                }
+            }
+        }
+        catch (Exception ex) 
+        { 
+            Console.WriteLine($"[LicitacoesRepository] Erro ao buscar resultado do item {itemId}: {ex.Message}"); 
         }
     }
 
@@ -458,7 +496,7 @@ public class LicitacoesRepository
     }
 
     /// <summary>
-    /// Busca os empenhos de uma licitação e adiciona seus arquivos ao array principal.
+    /// Busca os empenhos de uma licitação com a estrutura completa da API de Campinas.
     /// </summary>
     private async Task BuscarEmpenhosAsync(LicitacaoData licitacao, string editalId, CancellationToken cancellationToken)
     {
@@ -476,26 +514,62 @@ public class LicitacoesRepository
                 licitacao.Empenhos = new List<EmpenhoData>();
                 foreach (var emp in empData.EnumerateArray())
                 {
-                    var empenhoId = JsonHelper.GetInt(emp, "id");
+                    var empenhoId = JsonHelper.GetInt(emp, "id_empenho");
                     var numeroEmpenho = JsonHelper.GetString(emp, "numero_empenho");
                     
                     var empenho = new EmpenhoData
                     {
-                        Id = empenhoId,
-                        Ano = JsonHelper.GetNullableInt(emp, "ano"),
-                        Data = JsonHelper.GetString(emp, "data"),
+                        IdEmpenho = empenhoId,
+                        AnoCompra = JsonHelper.GetNullableInt(emp, "ano_compra"),
+                        NumeroProcesso = JsonHelper.GetString(emp, "numero_processo"),
                         NumeroEmpenho = numeroEmpenho,
-                        CpfCnpjFornecedor = JsonHelper.GetString(emp, "cpf_cnpj_fornecedor"),
-                        Fornecedor = JsonHelper.GetString(emp, "fornecedor"),
-                        ValorGlobal = JsonHelper.GetNullableDecimal(emp, "valor_global"),
-                        Objeto = JsonHelper.GetString(emp, "objeto"),
-                        CompraId = JsonHelper.GetNullableInt(emp, "compra_id"),
-                        CreatedAt = JsonHelper.GetString(emp, "created_at"),
-                        UpdatedAt = JsonHelper.GetString(emp, "updated_at")
+                        TipoEmpenho = JsonHelper.GetString(emp, "tipo_empenho"),
+                        Modalidade = JsonHelper.GetString(emp, "modalidade"),
+                        AnoContrato = JsonHelper.GetNullableInt(emp, "ano_contrato"),
+                        CategoriaProcessoId = JsonHelper.GetNullableInt(emp, "categoria_processo_id"),
+                        CodigoUnidade = JsonHelper.GetNullableInt(emp, "codigo_unidade"),
+                        TipoFornecedor = JsonHelper.GetString(emp, "tipo_fornecedor"),
+                        CgcFornecedor = JsonHelper.GetString(emp, "cgc_fornecedor"),
+                        NomeFornecedor = JsonHelper.GetString(emp, "nome_fornecedor"),
+                        CodGestora = JsonHelper.GetString(emp, "cod_gestora"),
+                        NomeGestora = JsonHelper.GetString(emp, "nome_gestora"),
+                        CodUo = JsonHelper.GetString(emp, "cod_uo"),
+                        NomeUo = JsonHelper.GetString(emp, "nome_uo"),
+                        CodPrograma = JsonHelper.GetString(emp, "cod_programa"),
+                        DescrPrograma = JsonHelper.GetString(emp, "descr_programa"),
+                        CodDespesa = JsonHelper.GetString(emp, "cod_despesa"),
+                        DescrDespesa = JsonHelper.GetString(emp, "descr_despesa"),
+                        CodFonte = JsonHelper.GetString(emp, "cod_fonte"),
+                        DescrFonte = JsonHelper.GetString(emp, "descr_fonte"),
+                        ValorEmpenhado = JsonHelper.GetNullableDecimal(emp, "valor_empenhado"),
+                        ValorReforco = JsonHelper.GetNullableDecimal(emp, "valor_reforco"),
+                        ValorAnulacao = JsonHelper.GetNullableDecimal(emp, "valor_anulacao"),
+                        ValorTotal = JsonHelper.GetNullableDecimal(emp, "valor_total"),
+                        DataAssinatura = JsonHelper.GetString(emp, "data_assinatura"),
+                        Objeto = JsonHelper.GetString(emp, "objeto")
                     };
 
-                    // Busca arquivos do empenho e adiciona ao array principal de arquivos
-                    await BuscarArquivosEmpenhoAsync(licitacao, empenho, editalId, empenhoId.ToString(), numeroEmpenho, cancellationToken);
+                    // Mapeia os itens do empenho
+                    if (emp.TryGetProperty("itens", out var itensEmp) && itensEmp.ValueKind == JsonValueKind.Array)
+                    {
+                        empenho.Itens = new List<EmpenhoItemData>();
+                        foreach (var itemEmp in itensEmp.EnumerateArray())
+                        {
+                            empenho.Itens.Add(new EmpenhoItemData
+                            {
+                                NumeroItem = JsonHelper.GetInt(itemEmp, "numero_item"),
+                                CodReduzido = JsonHelper.GetString(itemEmp, "cod_reduzido"),
+                                DescricaoItem = JsonHelper.GetString(itemEmp, "descricao_item"),
+                                Unidade = JsonHelper.GetString(itemEmp, "unidade"),
+                                Quantidade = JsonHelper.GetNullableDecimal(itemEmp, "quantidade"),
+                                ValorUnitario = JsonHelper.GetNullableDecimal(itemEmp, "valor_unitario"),
+                                ValorTotal = JsonHelper.GetNullableDecimal(itemEmp, "valor_total")
+                            });
+                        }
+                    }
+
+                    // Busca arquivos do empenho (se houver endpoint específico)
+                    // await BuscarArquivosEmpenhoAsync(licitacao, empenho, editalId, empenhoId.ToString(), numeroEmpenho, cancellationToken);
 
                     licitacao.Empenhos.Add(empenho);
                 }

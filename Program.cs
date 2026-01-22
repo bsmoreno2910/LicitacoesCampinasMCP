@@ -199,6 +199,20 @@ class Program
             }
         });
 
+        // Download de arquivo de empenho
+        app.MapGet("/api/compra/{compraId}/empenho/{empenhoId}/arquivo/{arquivoId}/download", async (string compraId, string empenhoId, string arquivoId, ArquivosRepository repository) => 
+        {
+            try 
+            { 
+                var arquivo = await repository.DownloadArquivoEmpenhoAsync(compraId, empenhoId, arquivoId);
+                return Results.File(arquivo.Bytes, arquivo.ContentType, arquivo.FileName);
+            }
+            catch (Exception ex) 
+            { 
+                return Results.Problem(ex.Message); 
+            }
+        });
+
         // Obter URL de download de arquivo
         app.MapGet("/api/compra/{compraId}/arquivo/{arquivoId}/url", async (string compraId, string arquivoId, ApiKeyService apiKeyService) => 
         {

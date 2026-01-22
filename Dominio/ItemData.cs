@@ -28,6 +28,24 @@ public class ItemData
     [JsonPropertyName("valor_unitario_estimado")] 
     public decimal ValorUnitarioEstimado { get; set; }
     
-    [JsonPropertyName("valor_total")] 
-    public decimal ValorTotal { get; set; }
+    [JsonPropertyName("valor_total_estimado")] 
+    public decimal ValorTotalEstimado { get; set; }
+    
+    [JsonPropertyName("valor_unitario_homologado")] 
+    public decimal? ValorUnitarioHomologado { get; set; }
+    
+    [JsonPropertyName("valor_total_homologado")] 
+    public decimal? ValorTotalHomologado { get; set; }
+    
+    [JsonPropertyName("situacao_item")] 
+    public string? SituacaoItem { get; set; }
+    
+    [JsonPropertyName("compra_id")] 
+    public int? CompraId { get; set; }
+    
+    [JsonPropertyName("created_at")] 
+    public string? CreatedAt { get; set; }
+    
+    [JsonPropertyName("updated_at")] 
+    public string? UpdatedAt { get; set; }
 }

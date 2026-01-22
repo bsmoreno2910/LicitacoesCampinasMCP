@@ -121,4 +121,42 @@ public static class JsonHelper
         }
         catch { return null; }
     }
+
+    /// <summary>
+    /// Obtém um decimal nullable de um JsonElement.
+    /// </summary>
+    public static decimal? GetNullableDecimal(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.Number) return v.GetDecimal();
+                if (v.ValueKind == JsonValueKind.String)
+                {
+                    var s = v.GetString()?.Replace(".", "").Replace(",", ".");
+                    return decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d : null;
+                }
+            }
+            return null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Obtém um long nullable de um JsonElement.
+    /// </summary>
+    public static long? GetNullableLong(JsonElement el, string prop)
+    {
+        try 
+        { 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                if (v.ValueKind == JsonValueKind.Number) return v.GetInt64();
+                if (v.ValueKind == JsonValueKind.String && long.TryParse(v.GetString(), out var l)) return l;
+            }
+            return null;
+        }
+        catch { return null; }
+    }
 }

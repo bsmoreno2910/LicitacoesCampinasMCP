@@ -136,6 +136,9 @@ public class LicitacoesRepository
         // Busca arquivos
         await BuscarArquivosAsync(licitacao, editalId, cancellationToken);
 
+        // Busca empenhos
+        await BuscarEmpenhosAsync(licitacao, editalId, cancellationToken);
+
         return licitacao;
     }
 
@@ -257,9 +260,14 @@ public class LicitacoesRepository
             {
                 licitacao.Itens = new List<ItemData>();
                 decimal totalEstimado = 0;
+                decimal totalHomologado = 0;
                 
                 foreach (var item in itensData.EnumerateArray())
                 {
+                    var valorTotalEstimado = JsonHelper.GetDecimal(item, "pncp_valor_total");
+                    var valorTotalHomologado = JsonHelper.GetNullableDecimal(item, "valor_total_homologado");
+                    var situacaoItem = JsonHelper.GetString(item, "situacao_item");
+                    
                     var itemData = new ItemData
                     {
                         Id = JsonHelper.GetInt(item, "id"),
@@ -269,13 +277,31 @@ public class LicitacoesRepository
                         Quantidade = JsonHelper.GetDecimal(item, "pncp_quantidade"),
                         UnidadeMedida = JsonHelper.GetString(item, "pncp_unidade_medida"),
                         ValorUnitarioEstimado = JsonHelper.GetDecimal(item, "pncp_valor_unitario_estimado"),
-                        ValorTotal = JsonHelper.GetDecimal(item, "pncp_valor_total")
+                        ValorTotalEstimado = valorTotalEstimado,
+                        ValorUnitarioHomologado = JsonHelper.GetNullableDecimal(item, "valor_unitario_homologado"),
+                        ValorTotalHomologado = valorTotalHomologado,
+                        SituacaoItem = situacaoItem,
+                        CompraId = JsonHelper.GetNullableInt(item, "compra_id"),
+                        CreatedAt = JsonHelper.GetString(item, "created_at"),
+                        UpdatedAt = JsonHelper.GetString(item, "updated_at")
                     };
                     licitacao.Itens.Add(itemData);
-                    totalEstimado += itemData.ValorTotal;
+                    totalEstimado += valorTotalEstimado;
+                    
+                    // Soma valor homologado se o item estiver homologado
+                    if (valorTotalHomologado.HasValue)
+                    {
+                        totalHomologado += valorTotalHomologado.Value;
+                    }
+                    else if (situacaoItem?.ToLower() == "homologado")
+                    {
+                        // Se não tem valor homologado mas está homologado, usa o valor estimado
+                        totalHomologado += valorTotalEstimado;
+                    }
                 }
                 
                 licitacao.ValorTotalEstimado = totalEstimado;
+                licitacao.ValorTotalHomologado = totalHomologado;
             }
         }
         catch (Exception ex) 
@@ -420,4 +446,89 @@ public class LicitacoesRepository
         return response;
     }
 
+    /// <summary>
+    /// Busca os empenhos de uma licitação.
+    /// </summary>
+    private async Task BuscarEmpenhosAsync(LicitacaoData licitacao, string editalId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var empDoc = await _apiService.GetAsync(
+                $"/compras/{editalId}/empenhos?page[number]=1&page[size]=1000",
+                cancellationToken);
+            
+            if (empDoc != null && empDoc.RootElement.TryGetProperty("data", out var empData))
+            {
+                licitacao.Empenhos = new List<EmpenhoData>();
+                foreach (var emp in empData.EnumerateArray())
+                {
+                    var empenhoId = JsonHelper.GetInt(emp, "id");
+                    var empenho = new EmpenhoData
+                    {
+                        Id = empenhoId,
+                        Ano = JsonHelper.GetNullableInt(emp, "ano"),
+                        Data = JsonHelper.GetString(emp, "data"),
+                        NumeroEmpenho = JsonHelper.GetString(emp, "numero_empenho"),
+                        CpfCnpjFornecedor = JsonHelper.GetString(emp, "cpf_cnpj_fornecedor"),
+                        Fornecedor = JsonHelper.GetString(emp, "fornecedor"),
+                        ValorGlobal = JsonHelper.GetNullableDecimal(emp, "valor_global"),
+                        Objeto = JsonHelper.GetString(emp, "objeto"),
+                        CompraId = JsonHelper.GetNullableInt(emp, "compra_id"),
+                        CreatedAt = JsonHelper.GetString(emp, "created_at"),
+                        UpdatedAt = JsonHelper.GetString(emp, "updated_at")
+                    };
+
+                    // Busca arquivos do empenho
+                    await BuscarArquivosEmpenhoAsync(empenho, editalId, empenhoId.ToString(), cancellationToken);
+
+                    licitacao.Empenhos.Add(empenho);
+                }
+            }
+        }
+        catch (Exception ex) 
+        { 
+            Console.WriteLine($"[LicitacoesRepository] Erro ao buscar empenhos: {ex.Message}"); 
+        }
+    }
+
+    /// <summary>
+    /// Busca os arquivos de um empenho específico.
+    /// </summary>
+    private async Task BuscarArquivosEmpenhoAsync(EmpenhoData empenho, string compraId, string empenhoId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var arqDoc = await _apiService.GetAsync(
+                $"/compras/{compraId}/empenhos/{empenhoId}?include=arquivos",
+                cancellationToken);
+            
+            if (arqDoc != null && arqDoc.RootElement.TryGetProperty("arquivos", out var arqData) && arqData.ValueKind == JsonValueKind.Array)
+            {
+                empenho.Arquivos = new List<EmpenhoArquivoData>();
+                foreach (var arq in arqData.EnumerateArray())
+                {
+                    var arquivoId = JsonHelper.GetInt(arq, "id");
+                    // Gera o link de download através da nossa API
+                    var linkDownload = $"{API_BASE_URL}/api/compra/{compraId}/empenho/{empenhoId}/arquivo/{arquivoId}/download";
+                    
+                    empenho.Arquivos.Add(new EmpenhoArquivoData
+                    {
+                        Id = arquivoId,
+                        Nome = JsonHelper.GetString(arq, "nome"),
+                        Descricao = JsonHelper.GetString(arq, "descricao"),
+                        Tipo = JsonHelper.GetString(arq, "tipo"),
+                        Tamanho = JsonHelper.GetNullableLong(arq, "tamanho"),
+                        EmpenhoId = JsonHelper.GetNullableInt(arq, "empenho_id"),
+                        CreatedAt = JsonHelper.GetString(arq, "created_at"),
+                        UpdatedAt = JsonHelper.GetString(arq, "updated_at"),
+                        DownloadUrl = linkDownload
+                    });
+                }
+            }
+        }
+        catch (Exception ex) 
+        { 
+            Console.WriteLine($"[LicitacoesRepository] Erro ao buscar arquivos do empenho: {ex.Message}"); 
+        }
+    }
 }

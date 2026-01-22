@@ -128,6 +128,9 @@ public class LicitacaoData
     [JsonPropertyName("itens")] 
     public List<ItemData>? Itens { get; set; }
     
+    [JsonPropertyName("empenhos")] 
+    public List<EmpenhoData>? Empenhos { get; set; }
+    
     // Metadados
     [JsonPropertyName("data_extracao")] 
     public string? DataExtracao { get; set; }

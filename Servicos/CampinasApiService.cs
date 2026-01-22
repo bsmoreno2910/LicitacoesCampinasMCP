@@ -177,6 +177,71 @@ public class CampinasApiService : IAsyncDisposable
         };
     }
 
+    /// <summary>
+    /// Faz download de um arquivo de empenho da API de Campinas via Browserless.
+    /// </summary>
+    public async Task<ArquivoDownload> DownloadArquivoEmpenhoAsync(string compraId, string empenhoId, string arquivoId, CancellationToken cancellationToken = default)
+    {
+        var apiContext = await GetApiContextAsync(cancellationToken);
+        
+        var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}/arquivos/{arquivoId}/blob";
+        Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO {endpoint} (via Browserless)");
+        
+        var response = await apiContext.GetAsync(endpoint);
+        
+        // Se a chave expirou, tenta renovar
+        if (!response.Ok && (response.Status == 401 || response.Status == 403))
+        {
+            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+            _apiKeyService.InvalidateApiKey();
+            
+            _currentApiKey = null;
+            apiContext = await GetApiContextAsync(cancellationToken);
+            response = await apiContext.GetAsync(endpoint);
+        }
+
+        if (!response.Ok)
+        {
+            var errorBody = await response.TextAsync();
+            throw new Exception($"Erro ao baixar arquivo de empenho: {response.Status} - {errorBody}");
+        }
+
+        var bytes = await response.BodyAsync();
+        var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
+        
+        // Tenta extrair nome do arquivo do header content-disposition
+        var fileName = $"empenho_{empenhoId}_arquivo_{arquivoId}";
+        if (response.Headers.TryGetValue("content-disposition", out var cd))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(cd, "filename[^;=\\n]*=(['\"]?)([^'\"\\n]*)");
+            if (match.Success) fileName = match.Groups[2].Value;
+        }
+        
+        // Adiciona extensão baseada no content-type se não tiver
+        if (!fileName.Contains("."))
+        {
+            fileName += contentType switch
+            {
+                "application/pdf" => ".pdf",
+                "image/jpeg" => ".jpg",
+                "image/png" => ".png",
+                "application/zip" => ".zip",
+                "application/msword" => ".doc",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+                "application/vnd.ms-excel" => ".xls",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+                _ => ""
+            };
+        }
+
+        return new ArquivoDownload
+        {
+            Bytes = bytes,
+            ContentType = contentType,
+            FileName = fileName
+        };
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _contextLock.WaitAsync();

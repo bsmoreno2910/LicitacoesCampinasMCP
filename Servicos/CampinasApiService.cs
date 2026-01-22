@@ -155,6 +155,31 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Busca informações de um arquivo específico da API.
+    /// </summary>
+    private async Task<string?> GetArquivoNomeAsync(string compraId, string arquivoId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var result = await GetAsync($"/compras/{compraId}/arquivos/{arquivoId}", cancellationToken);
+            if (result != null)
+            {
+                if (result.RootElement.TryGetProperty("nome", out var nomeElement))
+                {
+                    var nome = nomeElement.GetString();
+                    Console.WriteLine($"[CampinasApi] Nome do arquivo obtido da API: {nome}");
+                    return nome;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[CampinasApi] Erro ao buscar nome do arquivo: {ex.Message}");
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Identifica a extensão do arquivo usando MagicBytesValidator a partir de um arquivo.
     /// Lê apenas os primeiros bytes necessários para identificação.
     /// </summary>
@@ -202,57 +227,10 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Extrai o nome do arquivo do header Content-Disposition.
-    /// </summary>
-    private string ExtractFileNameFromContentDisposition(string? contentDisposition, string defaultName)
-    {
-        if (string.IsNullOrEmpty(contentDisposition))
-            return defaultName;
-            
-        Console.WriteLine($"[CampinasApi] Content-Disposition: {contentDisposition}");
-        
-        // Tenta extrair filename*=UTF-8''nome ou filename="nome"
-        var parts = contentDisposition.Split(';');
-        foreach (var part in parts)
-        {
-            var trimmed = part.Trim();
-            
-            // filename*=UTF-8''nome
-            if (trimmed.StartsWith("filename*=", StringComparison.OrdinalIgnoreCase))
-            {
-                var value = trimmed.Substring(10);
-                // Remove encoding prefix se existir (ex: UTF-8'')
-                var idx = value.IndexOf("''");
-                if (idx >= 0)
-                {
-                    value = Uri.UnescapeDataString(value.Substring(idx + 2));
-                }
-                if (!string.IsNullOrEmpty(value))
-                {
-                    Console.WriteLine($"[CampinasApi] Nome extraído (filename*): {value}");
-                    return value;
-                }
-            }
-            // filename="nome" ou filename=nome
-            else if (trimmed.StartsWith("filename=", StringComparison.OrdinalIgnoreCase))
-            {
-                var value = trimmed.Substring(9).Trim('"');
-                if (!string.IsNullOrEmpty(value))
-                {
-                    Console.WriteLine($"[CampinasApi] Nome extraído (filename): {value}");
-                    return value;
-                }
-            }
-        }
-        
-        return defaultName;
-    }
-
-    /// <summary>
     /// Faz download de um arquivo usando Playwright via página, salvando em disco.
     /// Suporta arquivos de qualquer tamanho pois não carrega na memória.
     /// </summary>
-    private async Task<ArquivoDownload> DownloadToFileAsync(string url, string defaultFileName, CancellationToken cancellationToken = default)
+    private async Task<ArquivoDownload> DownloadToFileAsync(string url, string fileName, CancellationToken cancellationToken = default)
     {
         var browser = await GetLocalBrowserAsync(cancellationToken);
         var apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
@@ -268,6 +246,7 @@ public class CampinasApiService : IAsyncDisposable
         try
         {
             Console.WriteLine($"[CampinasApi] DOWNLOAD VIA PÁGINA: {url}");
+            Console.WriteLine($"[CampinasApi] Nome do arquivo: {fileName}");
             Console.WriteLine($"[CampinasApi] Diretório de download: {downloadPath}");
             
             // Cria contexto com diretório de download configurado
@@ -330,43 +309,39 @@ public class CampinasApiService : IAsyncDisposable
                 throw new Exception("Timeout aguardando início do download");
             }
             
-            // Obtém o nome sugerido do arquivo
-            var suggestedFileName = download.SuggestedFilename ?? defaultFileName;
-            Console.WriteLine($"[CampinasApi] Nome sugerido pelo download: {suggestedFileName}");
-            
-            // Salva o arquivo em disco
-            downloadedFilePath = Path.Combine(downloadPath, suggestedFileName);
+            // Salva o arquivo em disco com nome temporário
+            var tempFileName = $"temp_{Guid.NewGuid()}";
+            downloadedFilePath = Path.Combine(downloadPath, tempFileName);
             await download.SaveAsAsync(downloadedFilePath);
             
             var fileInfo = new FileInfo(downloadedFilePath);
             Console.WriteLine($"[CampinasApi] Arquivo salvo: {downloadedFilePath} ({fileInfo.Length} bytes)");
             
-            // Identifica o tipo do arquivo
+            // Identifica o tipo do arquivo usando magic bytes
             var (detectedExtension, detectedMimeType) = await IdentifyFileTypeFromFileAsync(downloadedFilePath, cancellationToken);
             
             var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
                 ? detectedMimeType
                 : "application/octet-stream";
             
-            var fileName = suggestedFileName;
-            
-            // Adiciona extensão se não tiver
-            if (!HasValidExtension(fileName) && !string.IsNullOrEmpty(detectedExtension))
+            // Usa o nome fornecido e adiciona extensão se necessário
+            var finalFileName = fileName;
+            if (!HasValidExtension(finalFileName) && !string.IsNullOrEmpty(detectedExtension))
             {
-                fileName += $".{detectedExtension}";
+                finalFileName += $".{detectedExtension}";
                 Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
             }
             
             // Lê o arquivo do disco
             var bytes = await File.ReadAllBytesAsync(downloadedFilePath, cancellationToken);
             
-            Console.WriteLine($"[CampinasApi] Download concluído: {fileName} ({bytes.Length} bytes, {contentType})");
+            Console.WriteLine($"[CampinasApi] Download concluído: {finalFileName} ({bytes.Length} bytes, {contentType})");
             
             return new ArquivoDownload
             {
                 Bytes = bytes,
                 ContentType = contentType,
-                FileName = fileName
+                FileName = finalFileName
             };
         }
         finally
@@ -396,12 +371,16 @@ public class CampinasApiService : IAsyncDisposable
 
     /// <summary>
     /// Faz download de um arquivo da API de Campinas.
-    /// Usa download via página para salvar em disco (suporta arquivos grandes).
+    /// Busca o nome do arquivo da API antes de fazer o download.
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoAsync(string compraId, string arquivoId, CancellationToken cancellationToken = default)
     {
+        // Busca o nome do arquivo da API
+        var nomeArquivo = await GetArquivoNomeAsync(compraId, arquivoId, cancellationToken);
+        var fileName = !string.IsNullOrEmpty(nomeArquivo) ? nomeArquivo : $"arquivo_{arquivoId}";
+        
         var url = $"{BASE_URL}/compras/{compraId}/arquivos/{arquivoId}/blob";
-        return await DownloadToFileAsync(url, $"arquivo_{arquivoId}", cancellationToken);
+        return await DownloadToFileAsync(url, fileName, cancellationToken);
     }
 
     /// <summary>

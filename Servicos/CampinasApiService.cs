@@ -1,6 +1,7 @@
 using LicitacoesCampinasMCP.Dominio;
 using Microsoft.Playwright;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MagicBytesValidator.Services;
 using MagicBytesValidator.Services.Streams;
 
@@ -17,6 +18,17 @@ public class CampinasApiService : IAsyncDisposable
     private readonly ApiKeyService _apiKeyService;
     private readonly StreamFileTypeProvider _fileTypeProvider;
     private readonly Mapping _mapping;
+    
+    // Extensões de arquivo conhecidas
+    private static readonly HashSet<string> KnownExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
+        "txt", "rtf", "csv", "xml", "json", "html", "htm",
+        "zip", "rar", "7z", "tar", "gz", "bz2",
+        "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "svg", "webp",
+        "mp3", "mp4", "avi", "mov", "wmv", "flv", "mkv", "wav",
+        "exe", "msi", "dll", "bat", "sh"
+    };
     
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
     private const int REQUEST_TIMEOUT_MS = 300000; // 5 minutos
@@ -159,6 +171,25 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Verifica se o nome do arquivo tem uma extensão válida conhecida.
+    /// </summary>
+    private bool HasValidExtension(string fileName)
+    {
+        if (string.IsNullOrEmpty(fileName))
+            return false;
+            
+        // Procura por .extensão no final do nome
+        var match = Regex.Match(fileName, @"\.([a-zA-Z0-9]+)$");
+        if (match.Success)
+        {
+            var ext = match.Groups[1].Value;
+            return KnownExtensions.Contains(ext);
+        }
+        
+        return false;
+    }
+
+    /// <summary>
     /// Extrai o nome do arquivo do header Content-Disposition.
     /// </summary>
     private string ExtractFileNameFromHeaders(IAPIResponse response, string defaultName)
@@ -258,8 +289,8 @@ public class CampinasApiService : IAsyncDisposable
             // Extrai nome do arquivo do header
             var fileName = ExtractFileNameFromHeaders(response, $"arquivo_{arquivoId}");
             
-            // Adiciona extensão detectada pelos magic bytes se não tiver extensão
-            if (!fileName.Contains(".") && !string.IsNullOrEmpty(detectedExtension))
+            // Adiciona extensão detectada pelos magic bytes se não tiver extensão válida
+            if (!HasValidExtension(fileName) && !string.IsNullOrEmpty(detectedExtension))
             {
                 fileName += $".{detectedExtension}";
                 Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
@@ -332,7 +363,7 @@ public class CampinasApiService : IAsyncDisposable
             
             var fileName = ExtractFileNameFromHeaders(response, $"empenho_{empenhoId}_arquivo_{arquivoId}");
             
-            if (!fileName.Contains(".") && !string.IsNullOrEmpty(detectedExtension))
+            if (!HasValidExtension(fileName) && !string.IsNullOrEmpty(detectedExtension))
             {
                 fileName += $".{detectedExtension}";
                 Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
@@ -406,8 +437,8 @@ public class CampinasApiService : IAsyncDisposable
             
             var fileName = ExtractFileNameFromHeaders(response, $"empenho_{empenhoId}");
             
-            // Adiciona extensão se não tiver
-            if (!fileName.Contains("."))
+            // Adiciona extensão se não tiver extensão válida
+            if (!HasValidExtension(fileName))
             {
                 if (!string.IsNullOrEmpty(detectedExtension))
                 {

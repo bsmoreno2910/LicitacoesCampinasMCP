@@ -2,8 +2,6 @@ using LicitacoesCampinasMCP.Dominio;
 using Microsoft.Playwright;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Net.Http;
-using System.Net.Http.Headers;
 using MagicBytesValidator.Services;
 using MagicBytesValidator.Services.Streams;
 
@@ -12,7 +10,7 @@ namespace LicitacoesCampinasMCP.Servicos;
 /// <summary>
 /// Serviço responsável por fazer requisições à API de contratações de Campinas.
 /// Usa Playwright/Browserless para requisições de API JSON.
-/// Usa HttpClient nativo para downloads de arquivos (streaming).
+/// Usa Playwright LOCAL para downloads de arquivos (suporta arquivos grandes).
 /// Utiliza MagicBytesValidator para identificar o tipo correto de arquivo pelos magic bytes.
 /// </summary>
 public class CampinasApiService : IAsyncDisposable
@@ -21,7 +19,11 @@ public class CampinasApiService : IAsyncDisposable
     private readonly ApiKeyService _apiKeyService;
     private readonly StreamFileTypeProvider _fileTypeProvider;
     private readonly Mapping _mapping;
-    private readonly HttpClient _httpClient;
+    
+    // Playwright local para downloads
+    private IPlaywright? _localPlaywright;
+    private IBrowser? _localBrowser;
+    private readonly SemaphoreSlim _localBrowserLock = new(1, 1);
     
     // Extensões de arquivo conhecidas
     private static readonly HashSet<string> KnownExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -45,23 +47,49 @@ public class CampinasApiService : IAsyncDisposable
         // Inicializa o MagicBytesValidator
         _mapping = new Mapping();
         _fileTypeProvider = new StreamFileTypeProvider(_mapping);
-        
-        // HttpClient para downloads de arquivos
-        var handler = new HttpClientHandler
-        {
-            AllowAutoRedirect = true,
-            MaxAutomaticRedirections = 10
-        };
-        _httpClient = new HttpClient(handler)
-        {
-            Timeout = TimeSpan.FromMilliseconds(REQUEST_TIMEOUT_MS)
-        };
-        _httpClient.DefaultRequestHeaders.Add("Accept", "*/*");
-        _httpClient.DefaultRequestHeaders.Add("Origin", "https://campinas.sp.gov.br");
     }
 
     /// <summary>
-    /// Cria um contexto de API com a chave atual usando uma sessão do pool.
+    /// Obtém ou cria uma instância do Playwright local para downloads.
+    /// </summary>
+    private async Task<IAPIRequestContext> GetLocalApiContextAsync(CancellationToken cancellationToken = default)
+    {
+        await _localBrowserLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_localPlaywright == null)
+            {
+                Console.WriteLine("[CampinasApi] Inicializando Playwright LOCAL para downloads...");
+                _localPlaywright = await Playwright.CreateAsync();
+                _localBrowser = await _localPlaywright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+                {
+                    Headless = true
+                });
+                Console.WriteLine("[CampinasApi] Playwright LOCAL inicializado com sucesso!");
+            }
+            
+            var apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
+            
+            return await _localPlaywright.APIRequest.NewContextAsync(new APIRequestNewContextOptions
+            {
+                BaseURL = BASE_URL,
+                Timeout = REQUEST_TIMEOUT_MS,
+                ExtraHTTPHeaders = new Dictionary<string, string>
+                {
+                    ["x-api-key"] = apiKey,
+                    ["Accept"] = "*/*",
+                    ["Origin"] = "https://campinas.sp.gov.br"
+                }
+            });
+        }
+        finally
+        {
+            _localBrowserLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Cria um contexto de API com a chave atual usando uma sessão do pool (Browserless).
     /// </summary>
     private async Task<IAPIRequestContext> CreateApiContextAsync(BrowserSession session, CancellationToken cancellationToken = default)
     {
@@ -186,57 +214,47 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Extrai o nome do arquivo do header Content-Disposition de uma resposta HTTP.
+    /// Extrai o nome do arquivo do header Content-Disposition de uma resposta Playwright.
     /// </summary>
-    private string ExtractFileNameFromHttpHeaders(HttpResponseMessage response, string defaultName)
+    private string ExtractFileNameFromHeaders(IAPIResponse response, string defaultName)
     {
-        var contentDisposition = response.Content.Headers.ContentDisposition;
+        var headers = response.Headers;
         
-        if (contentDisposition != null)
+        if (headers.TryGetValue("content-disposition", out var contentDisposition) && !string.IsNullOrEmpty(contentDisposition))
         {
             Console.WriteLine($"[CampinasApi] Content-Disposition: {contentDisposition}");
             
-            // Tenta filename* primeiro (RFC 5987)
-            if (!string.IsNullOrEmpty(contentDisposition.FileNameStar))
+            // Tenta extrair filename*=UTF-8''nome ou filename="nome"
+            var parts = contentDisposition.Split(';');
+            foreach (var part in parts)
             {
-                var fileName = contentDisposition.FileNameStar;
-                Console.WriteLine($"[CampinasApi] Nome extraído (FileNameStar): {fileName}");
-                return fileName;
-            }
-            
-            // Fallback para filename
-            if (!string.IsNullOrEmpty(contentDisposition.FileName))
-            {
-                var fileName = contentDisposition.FileName.Trim('"');
-                Console.WriteLine($"[CampinasApi] Nome extraído (FileName): {fileName}");
-                return fileName;
-            }
-        }
-        
-        // Tenta extrair do header raw se o parser não conseguiu
-        if (response.Content.Headers.TryGetValues("Content-Disposition", out var values))
-        {
-            var headerValue = values.FirstOrDefault();
-            if (!string.IsNullOrEmpty(headerValue))
-            {
-                Console.WriteLine($"[CampinasApi] Content-Disposition raw: {headerValue}");
+                var trimmed = part.Trim();
                 
-                // Tenta extrair filename*=UTF-8''nome
-                var match = Regex.Match(headerValue, @"filename\*=UTF-8''([^;]+)", RegexOptions.IgnoreCase);
-                if (match.Success)
+                // filename*=UTF-8''nome
+                if (trimmed.StartsWith("filename*=", StringComparison.OrdinalIgnoreCase))
                 {
-                    var fileName = Uri.UnescapeDataString(match.Groups[1].Value);
-                    Console.WriteLine($"[CampinasApi] Nome extraído (regex filename*): {fileName}");
-                    return fileName;
+                    var value = trimmed.Substring(10);
+                    // Remove encoding prefix se existir (ex: UTF-8'')
+                    var idx = value.IndexOf("''");
+                    if (idx >= 0)
+                    {
+                        value = Uri.UnescapeDataString(value.Substring(idx + 2));
+                    }
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        Console.WriteLine($"[CampinasApi] Nome extraído (filename*): {value}");
+                        return value;
+                    }
                 }
-                
-                // Tenta extrair filename="nome" ou filename=nome
-                match = Regex.Match(headerValue, @"filename=""?([^"";]+)""?", RegexOptions.IgnoreCase);
-                if (match.Success)
+                // filename="nome" ou filename=nome
+                else if (trimmed.StartsWith("filename=", StringComparison.OrdinalIgnoreCase))
                 {
-                    var fileName = match.Groups[1].Value;
-                    Console.WriteLine($"[CampinasApi] Nome extraído (regex filename): {fileName}");
-                    return fileName;
+                    var value = trimmed.Substring(9).Trim('"');
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        Console.WriteLine($"[CampinasApi] Nome extraído (filename): {value}");
+                        return value;
+                    }
                 }
             }
         }
@@ -245,197 +263,232 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Faz download de um arquivo da API de Campinas usando HttpClient.
-    /// Usa streaming para suportar arquivos grandes.
+    /// Faz download de um arquivo da API de Campinas usando Playwright LOCAL.
+    /// Suporta arquivos grandes sem limite de memória do Browserless.
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoAsync(string compraId, string arquivoId, CancellationToken cancellationToken = default)
     {
-        var apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
-        var url = $"{BASE_URL}/compras/{compraId}/arquivos/{arquivoId}/blob";
+        IAPIRequestContext? apiContext = null;
         
-        Console.WriteLine($"[CampinasApi] DOWNLOAD {url} (via HttpClient)");
-        
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Add("x-api-key", apiKey);
-        
-        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        
-        // Se a chave expirou, tenta renovar
-        if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
+        try
         {
-            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
-            _apiKeyService.InvalidateApiKey();
-            apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
+            apiContext = await GetLocalApiContextAsync(cancellationToken);
             
-            using var retryRequest = new HttpRequestMessage(HttpMethod.Get, url);
-            retryRequest.Headers.Add("x-api-key", apiKey);
-            response = await _httpClient.SendAsync(retryRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        }
-
-        if (!response.IsSuccessStatusCode)
-        {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new Exception($"Erro ao baixar arquivo: {(int)response.StatusCode} - {errorBody}");
-        }
-
-        // Lê o arquivo como stream para suportar arquivos grandes
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        
-        // Identifica o tipo real do arquivo usando magic bytes
-        var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
-        
-        // Usa o content-type detectado pelos magic bytes, ou fallback para o header
-        var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
-            ? detectedMimeType
-            : response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-        
-        // Extrai nome do arquivo do header
-        var fileName = ExtractFileNameFromHttpHeaders(response, $"arquivo_{arquivoId}");
-        
-        // Adiciona extensão detectada pelos magic bytes se não tiver extensão válida
-        if (!HasValidExtension(fileName) && !string.IsNullOrEmpty(detectedExtension))
-        {
-            fileName += $".{detectedExtension}";
-            Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
-        }
-
-        Console.WriteLine($"[CampinasApi] Download concluído: {fileName} ({bytes.Length} bytes, {contentType})");
-        
-        return new ArquivoDownload
-        {
-            Bytes = bytes,
-            ContentType = contentType,
-            FileName = fileName
-        };
-    }
-
-    /// <summary>
-    /// Faz download de um arquivo de empenho da API de Campinas usando HttpClient.
-    /// </summary>
-    public async Task<ArquivoDownload> DownloadArquivoEmpenhoAsync(string compraId, string empenhoId, string arquivoId, CancellationToken cancellationToken = default)
-    {
-        var apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
-        var url = $"{BASE_URL}/compras/{compraId}/empenhos/{empenhoId}/arquivos/{arquivoId}/blob";
-        
-        Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO ARQUIVO {url} (via HttpClient)");
-        
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Add("x-api-key", apiKey);
-        
-        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        
-        if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
-        {
-            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
-            _apiKeyService.InvalidateApiKey();
-            apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
+            var endpoint = $"/compras/{compraId}/arquivos/{arquivoId}/blob";
+            Console.WriteLine($"[CampinasApi] DOWNLOAD {endpoint} (via Playwright LOCAL)");
             
-            using var retryRequest = new HttpRequestMessage(HttpMethod.Get, url);
-            retryRequest.Headers.Add("x-api-key", apiKey);
-            response = await _httpClient.SendAsync(retryRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        }
-
-        if (!response.IsSuccessStatusCode)
-        {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new Exception($"Erro ao baixar arquivo de empenho: {(int)response.StatusCode} - {errorBody}");
-        }
-
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
-        
-        var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
-            ? detectedMimeType
-            : response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-        
-        var fileName = ExtractFileNameFromHttpHeaders(response, $"empenho_{empenhoId}_arquivo_{arquivoId}");
-        
-        if (!HasValidExtension(fileName) && !string.IsNullOrEmpty(detectedExtension))
-        {
-            fileName += $".{detectedExtension}";
-            Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
-        }
-
-        Console.WriteLine($"[CampinasApi] Download concluído: {fileName} ({bytes.Length} bytes, {contentType})");
-        
-        return new ArquivoDownload
-        {
-            Bytes = bytes,
-            ContentType = contentType,
-            FileName = fileName
-        };
-    }
-
-    /// <summary>
-    /// Faz download direto do PDF de um empenho da API de Campinas usando HttpClient.
-    /// O endpoint /compras/{compraId}/empenhos/{empenhoId} retorna diretamente o arquivo PDF.
-    /// </summary>
-    public async Task<ArquivoDownload> DownloadEmpenhoAsync(string compraId, string empenhoId, CancellationToken cancellationToken = default)
-    {
-        var apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
-        var url = $"{BASE_URL}/compras/{compraId}/empenhos/{empenhoId}";
-        
-        Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO DIRETO {url} (via HttpClient)");
-        
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Add("x-api-key", apiKey);
-        
-        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        
-        if ((int)response.StatusCode == 401 || (int)response.StatusCode == 403)
-        {
-            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
-            _apiKeyService.InvalidateApiKey();
-            apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
+            var response = await apiContext.GetAsync(endpoint);
             
-            using var retryRequest = new HttpRequestMessage(HttpMethod.Get, url);
-            retryRequest.Headers.Add("x-api-key", apiKey);
-            response = await _httpClient.SendAsync(retryRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        }
+            // Se a chave expirou, tenta renovar
+            if (!response.Ok && (response.Status == 401 || response.Status == 403))
+            {
+                Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+                _apiKeyService.InvalidateApiKey();
+                
+                await apiContext.DisposeAsync();
+                apiContext = await GetLocalApiContextAsync(cancellationToken);
+                response = await apiContext.GetAsync(endpoint);
+            }
 
-        if (!response.IsSuccessStatusCode)
-        {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new Exception($"Erro ao baixar empenho: {(int)response.StatusCode} - {errorBody}");
-        }
+            if (!response.Ok)
+            {
+                var errorBody = await response.TextAsync();
+                throw new Exception($"Erro ao baixar arquivo: {response.Status} - {errorBody}");
+            }
 
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
-        
-        var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
-            ? detectedMimeType
-            : response.Content.Headers.ContentType?.MediaType ?? "application/pdf";
-        
-        var fileName = ExtractFileNameFromHttpHeaders(response, $"empenho_{empenhoId}");
-        
-        // Adiciona extensão se não tiver extensão válida
-        if (!HasValidExtension(fileName))
-        {
-            if (!string.IsNullOrEmpty(detectedExtension))
+            // Lê o arquivo como bytes
+            var bytes = await response.BodyAsync();
+            
+            // Identifica o tipo real do arquivo usando magic bytes
+            var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
+            
+            // Usa o content-type detectado pelos magic bytes, ou fallback para o header
+            var headerContentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
+            var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
+                ? detectedMimeType
+                : headerContentType;
+            
+            // Extrai nome do arquivo do header
+            var fileName = ExtractFileNameFromHeaders(response, $"arquivo_{arquivoId}");
+            
+            // Adiciona extensão detectada pelos magic bytes se não tiver extensão válida
+            if (!HasValidExtension(fileName) && !string.IsNullOrEmpty(detectedExtension))
             {
                 fileName += $".{detectedExtension}";
                 Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
             }
-            else
+
+            Console.WriteLine($"[CampinasApi] Download concluído: {fileName} ({bytes.Length} bytes, {contentType})");
+            
+            return new ArquivoDownload
             {
-                // Fallback para .pdf se não conseguir detectar
-                fileName += ".pdf";
+                Bytes = bytes,
+                ContentType = contentType,
+                FileName = fileName
+            };
+        }
+        finally
+        {
+            if (apiContext != null)
+            {
+                await apiContext.DisposeAsync();
             }
         }
-
-        Console.WriteLine($"[CampinasApi] Download concluído: {fileName} ({bytes.Length} bytes, {contentType})");
-        
-        return new ArquivoDownload
-        {
-            Bytes = bytes,
-            ContentType = contentType,
-            FileName = fileName
-        };
     }
 
-    public ValueTask DisposeAsync()
+    /// <summary>
+    /// Faz download de um arquivo de empenho da API de Campinas usando Playwright LOCAL.
+    /// </summary>
+    public async Task<ArquivoDownload> DownloadArquivoEmpenhoAsync(string compraId, string empenhoId, string arquivoId, CancellationToken cancellationToken = default)
     {
-        _httpClient.Dispose();
-        return ValueTask.CompletedTask;
+        IAPIRequestContext? apiContext = null;
+        
+        try
+        {
+            apiContext = await GetLocalApiContextAsync(cancellationToken);
+            
+            var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}/arquivos/{arquivoId}/blob";
+            Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO ARQUIVO {endpoint} (via Playwright LOCAL)");
+            
+            var response = await apiContext.GetAsync(endpoint);
+            
+            if (!response.Ok && (response.Status == 401 || response.Status == 403))
+            {
+                Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+                _apiKeyService.InvalidateApiKey();
+                
+                await apiContext.DisposeAsync();
+                apiContext = await GetLocalApiContextAsync(cancellationToken);
+                response = await apiContext.GetAsync(endpoint);
+            }
+
+            if (!response.Ok)
+            {
+                var errorBody = await response.TextAsync();
+                throw new Exception($"Erro ao baixar arquivo de empenho: {response.Status} - {errorBody}");
+            }
+
+            var bytes = await response.BodyAsync();
+            var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
+            
+            var headerContentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
+            var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
+                ? detectedMimeType
+                : headerContentType;
+            
+            var fileName = ExtractFileNameFromHeaders(response, $"empenho_{empenhoId}_arquivo_{arquivoId}");
+            
+            if (!HasValidExtension(fileName) && !string.IsNullOrEmpty(detectedExtension))
+            {
+                fileName += $".{detectedExtension}";
+                Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
+            }
+
+            Console.WriteLine($"[CampinasApi] Download concluído: {fileName} ({bytes.Length} bytes, {contentType})");
+            
+            return new ArquivoDownload
+            {
+                Bytes = bytes,
+                ContentType = contentType,
+                FileName = fileName
+            };
+        }
+        finally
+        {
+            if (apiContext != null)
+            {
+                await apiContext.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Faz download direto do PDF de um empenho da API de Campinas usando Playwright LOCAL.
+    /// O endpoint /compras/{compraId}/empenhos/{empenhoId} retorna diretamente o arquivo PDF.
+    /// </summary>
+    public async Task<ArquivoDownload> DownloadEmpenhoAsync(string compraId, string empenhoId, CancellationToken cancellationToken = default)
+    {
+        IAPIRequestContext? apiContext = null;
+        
+        try
+        {
+            apiContext = await GetLocalApiContextAsync(cancellationToken);
+            
+            var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}";
+            Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO DIRETO {endpoint} (via Playwright LOCAL)");
+            
+            var response = await apiContext.GetAsync(endpoint);
+            
+            if (!response.Ok && (response.Status == 401 || response.Status == 403))
+            {
+                Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+                _apiKeyService.InvalidateApiKey();
+                
+                await apiContext.DisposeAsync();
+                apiContext = await GetLocalApiContextAsync(cancellationToken);
+                response = await apiContext.GetAsync(endpoint);
+            }
+
+            if (!response.Ok)
+            {
+                var errorBody = await response.TextAsync();
+                throw new Exception($"Erro ao baixar empenho: {response.Status} - {errorBody}");
+            }
+
+            var bytes = await response.BodyAsync();
+            var (detectedExtension, detectedMimeType) = await IdentifyFileTypeAsync(bytes, cancellationToken);
+            
+            var headerContentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/pdf";
+            var contentType = !string.IsNullOrEmpty(detectedMimeType) && detectedMimeType != "application/octet-stream"
+                ? detectedMimeType
+                : headerContentType;
+            
+            var fileName = ExtractFileNameFromHeaders(response, $"empenho_{empenhoId}");
+            
+            // Adiciona extensão se não tiver extensão válida
+            if (!HasValidExtension(fileName))
+            {
+                if (!string.IsNullOrEmpty(detectedExtension))
+                {
+                    fileName += $".{detectedExtension}";
+                    Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
+                }
+                else
+                {
+                    // Fallback para .pdf se não conseguir detectar
+                    fileName += ".pdf";
+                }
+            }
+
+            Console.WriteLine($"[CampinasApi] Download concluído: {fileName} ({bytes.Length} bytes, {contentType})");
+            
+            return new ArquivoDownload
+            {
+                Bytes = bytes,
+                ContentType = contentType,
+                FileName = fileName
+            };
+        }
+        finally
+        {
+            if (apiContext != null)
+            {
+                await apiContext.DisposeAsync();
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_localBrowser != null)
+        {
+            await _localBrowser.CloseAsync();
+            _localBrowser = null;
+        }
+        
+        _localPlaywright?.Dispose();
+        _localPlaywright = null;
+        
+        _localBrowserLock.Dispose();
     }
 }

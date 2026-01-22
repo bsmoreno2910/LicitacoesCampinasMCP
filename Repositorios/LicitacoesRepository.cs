@@ -67,16 +67,7 @@ public class LicitacoesRepository
         // Unidade
         if (root.TryGetProperty("unidade", out var unidade) && unidade.ValueKind != JsonValueKind.Null)
         {
-            licitacao.Unidade = new UnidadeData
-            {
-                Id = JsonHelper.GetInt(unidade, "id"),
-                PncpCodigoIBGE = JsonHelper.GetString(unidade, "pncp_codigo_IBGE"),
-                PncpCodigoUnidade = JsonHelper.GetString(unidade, "pncp_codigo_unidade"),
-                PncpNomeUnidade = JsonHelper.GetString(unidade, "pncp_nome_unidade"),
-                OrgaoId = JsonHelper.GetNullableInt(unidade, "orgao_id"),
-                CreatedAt = JsonHelper.GetString(unidade, "created_at"),
-                UpdatedAt = JsonHelper.GetString(unidade, "updated_at")
-            };
+            licitacao.Unidade = MapUnidade(unidade);
         }
 
         // Modalidade
@@ -149,6 +140,23 @@ public class LicitacoesRepository
     }
 
     /// <summary>
+    /// Mapeia um elemento JSON para UnidadeData com todos os campos.
+    /// </summary>
+    private UnidadeData MapUnidade(JsonElement element)
+    {
+        return new UnidadeData
+        {
+            Id = JsonHelper.GetInt(element, "id"),
+            PncpCodigoIBGE = JsonHelper.GetString(element, "pncp_codigo_IBGE"),
+            PncpCodigoUnidade = JsonHelper.GetString(element, "pncp_codigo_unidade"),
+            PncpNomeUnidade = JsonHelper.GetString(element, "pncp_nome_unidade"),
+            OrgaoId = JsonHelper.GetNullableInt(element, "orgao_id"),
+            CreatedAt = JsonHelper.GetString(element, "created_at"),
+            UpdatedAt = JsonHelper.GetString(element, "updated_at")
+        };
+    }
+
+    /// <summary>
     /// Mapeia um elemento JSON para DominioData com todos os campos.
     /// </summary>
     private DominioData MapDominio(JsonElement element)
@@ -166,6 +174,72 @@ public class LicitacoesRepository
             CreatedAt = JsonHelper.GetString(element, "created_at"),
             UpdatedAt = JsonHelper.GetString(element, "updated_at")
         };
+    }
+
+    /// <summary>
+    /// Mapeia um elemento JSON para LicitacaoResumo com todos os campos.
+    /// </summary>
+    private LicitacaoResumo MapLicitacaoResumo(JsonElement item)
+    {
+        var id = JsonHelper.GetInt(item, "id");
+        
+        var lic = new LicitacaoResumo
+        {
+            Id = id,
+            PncpAnoCompra = JsonHelper.GetNullableInt(item, "pncp_ano_compra"),
+            PncpNumeroCompra = JsonHelper.GetString(item, "pncp_numero_compra"),
+            PncpNumeroProcesso = JsonHelper.GetString(item, "pncp_numero_processo"),
+            PncpObjetoCompra = JsonHelper.GetString(item, "pncp_objeto_compra"),
+            PncpSrp = JsonHelper.GetNullableBool(item, "pncp_srp"),
+            PncpDataAberturaProposta = JsonHelper.GetString(item, "pncp_data_abertura_proposta"),
+            PncpDataEncerramentoProposta = JsonHelper.GetString(item, "pncp_data_encerramento_proposta"),
+            PncpCodigoUnidadeCompradora = JsonHelper.GetString(item, "pncp_codigo_unidade_compradora"),
+            OrgaoId = JsonHelper.GetNullableInt(item, "orgao_id"),
+            Situacao = JsonHelper.GetString(item, "situacao"),
+            Status = JsonHelper.GetString(item, "status"),
+            CreatedAt = JsonHelper.GetString(item, "created_at"),
+            UpdatedAt = JsonHelper.GetString(item, "updated_at"),
+            NumeroControlePncp = JsonHelper.GetString(item, "numero_controle_pncp"),
+            Url = $"https://campinas.sp.gov.br/licitacoes/edital/{id}"
+        };
+
+        // Unidade
+        if (item.TryGetProperty("unidade", out var unidade) && unidade.ValueKind != JsonValueKind.Null)
+        {
+            lic.Unidade = MapUnidade(unidade);
+        }
+
+        // Modalidade
+        if (item.TryGetProperty("modalidade", out var modalidade) && modalidade.ValueKind != JsonValueKind.Null)
+        {
+            lic.Modalidade = MapDominio(modalidade);
+        }
+
+        // Situação da Compra
+        if (item.TryGetProperty("situacao_compra", out var sitCompra) && sitCompra.ValueKind != JsonValueKind.Null)
+        {
+            lic.SituacaoCompra = MapDominio(sitCompra);
+        }
+
+        // Amparo Legal
+        if (item.TryGetProperty("amparo_legal", out var amparoLegal) && amparoLegal.ValueKind != JsonValueKind.Null)
+        {
+            lic.AmparoLegal = MapDominio(amparoLegal);
+        }
+
+        // Instrumento Convocatório
+        if (item.TryGetProperty("instrumento_convocatorio", out var instrConv) && instrConv.ValueKind != JsonValueKind.Null)
+        {
+            lic.InstrumentoConvocatorio = MapDominio(instrConv);
+        }
+
+        // Modo de Disputa
+        if (item.TryGetProperty("modo_disputa", out var modoDisputa) && modoDisputa.ValueKind != JsonValueKind.Null)
+        {
+            lic.ModoDisputa = MapDominio(modoDisputa);
+        }
+
+        return lic;
     }
 
     /// <summary>
@@ -253,7 +327,7 @@ public class LicitacoesRepository
     public async Task<ListaLicitacoesResponse> ListarAsync(int pagina = 1, int itensPorPagina = 100, CancellationToken cancellationToken = default)
     {
         var doc = await _apiService.GetAsync(
-            $"/compras?page[number]={pagina}&page[size]={itensPorPagina}&sort=-id&include=objeto,unidade,modalidade,situacao_compra",
+            $"/compras?page[number]={pagina}&page[size]={itensPorPagina}&sort=-id&include=unidade,modalidade,situacao_compra,amparo_legal,instrumento_convocatorio,modo_disputa",
             cancellationToken);
         
         var response = new ListaLicitacoesResponse
@@ -271,29 +345,7 @@ public class LicitacoesRepository
         {
             foreach (var item in data.EnumerateArray())
             {
-                var id = JsonHelper.GetInt(item, "id");
-                
-                var lic = new LicitacaoResumo
-                {
-                    Id = id,
-                    NumeroCompra = JsonHelper.GetString(item, "pncp_numero_compra"),
-                    Processo = JsonHelper.GetString(item, "pncp_numero_processo"),
-                    Objeto = JsonHelper.GetString(item, "pncp_objeto_compra"),
-                    Status = JsonHelper.GetString(item, "status"),
-                    Url = $"https://campinas.sp.gov.br/licitacoes/edital/{id}"
-                };
-
-                // Relacionamentos inline
-                if (item.TryGetProperty("modalidade", out var mod))
-                    lic.Modalidade = JsonHelper.GetString(mod, "item_titulo");
-                
-                if (item.TryGetProperty("unidade", out var unid))
-                    lic.Unidade = JsonHelper.GetString(unid, "pncp_nome_unidade");
-                
-                if (item.TryGetProperty("situacao_compra", out var sit))
-                    lic.Status = JsonHelper.GetString(sit, "item_titulo");
-
-                response.Licitacoes.Add(lic);
+                response.Licitacoes.Add(MapLicitacaoResumo(item));
             }
         }
 
@@ -331,7 +383,7 @@ public class LicitacoesRepository
         
         var queryString = string.Join("&", filtros);
         var doc = await _apiService.GetAsync(
-            $"/compras?{queryString}&page[number]=1&page[size]=100&sort=-id",
+            $"/compras?{queryString}&page[number]=1&page[size]=100&sort=-id&include=unidade,modalidade,situacao_compra,amparo_legal,instrumento_convocatorio,modo_disputa",
             cancellationToken);
         
         if (doc == null)
@@ -343,28 +395,7 @@ public class LicitacoesRepository
         {
             foreach (var item in data.EnumerateArray())
             {
-                var id = JsonHelper.GetInt(item, "id");
-                
-                var lic = new LicitacaoResumo
-                {
-                    Id = id,
-                    NumeroCompra = JsonHelper.GetString(item, "pncp_numero_compra"),
-                    Processo = JsonHelper.GetString(item, "pncp_numero_processo"),
-                    Objeto = JsonHelper.GetString(item, "pncp_objeto_compra"),
-                    Status = JsonHelper.GetString(item, "status"),
-                    Url = $"https://campinas.sp.gov.br/licitacoes/edital/{id}"
-                };
-
-                if (item.TryGetProperty("modalidade", out var mod))
-                    lic.Modalidade = JsonHelper.GetString(mod, "item_titulo");
-                
-                if (item.TryGetProperty("unidade", out var unid))
-                    lic.Unidade = JsonHelper.GetString(unid, "pncp_nome_unidade");
-                
-                if (item.TryGetProperty("situacao_compra", out var sit))
-                    lic.Status = JsonHelper.GetString(sit, "item_titulo");
-
-                response.Licitacoes.Add(lic);
+                response.Licitacoes.Add(MapLicitacaoResumo(item));
             }
         }
 

@@ -18,6 +18,7 @@ public class CampinasApiService : IAsyncDisposable
     private readonly ApiKeyService _apiKeyService;
     private readonly HttpClient _httpClient;
     private readonly StreamFileTypeProvider _fileTypeProvider;
+    private readonly Mapping _mapping;
     
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
     private const int REQUEST_TIMEOUT_MS = 300000; // 5 minutos
@@ -26,7 +27,10 @@ public class CampinasApiService : IAsyncDisposable
     {
         _browserPool = browserPool;
         _apiKeyService = apiKeyService;
-        _fileTypeProvider = new StreamFileTypeProvider();
+        
+        // Inicializa o MagicBytesValidator
+        _mapping = new Mapping();
+        _fileTypeProvider = new StreamFileTypeProvider(_mapping);
         
         // HttpClient para downloads de arquivos grandes
         var handler = new HttpClientHandler

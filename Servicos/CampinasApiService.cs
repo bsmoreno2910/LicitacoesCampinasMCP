@@ -36,6 +36,33 @@ public class CampinasApiService : IAsyncDisposable
         "exe", "msi", "dll", "bat", "sh"
     };
     
+    // Mapeamento de magic bytes para extensões (fallback manual)
+    private static readonly Dictionary<string, (string extension, string mimeType)> MagicBytesMap = new()
+    {
+        // PDF
+        { "255044462D", ("pdf", "application/pdf") },
+        // ZIP
+        { "504B0304", ("zip", "application/zip") },
+        { "504B0506", ("zip", "application/zip") },
+        { "504B0708", ("zip", "application/zip") },
+        // RAR
+        { "526172211A07", ("rar", "application/x-rar-compressed") },
+        // 7Z
+        { "377ABCAF271C", ("7z", "application/x-7z-compressed") },
+        // PNG
+        { "89504E470D0A1A0A", ("png", "image/png") },
+        // JPEG
+        { "FFD8FF", ("jpg", "image/jpeg") },
+        // GIF
+        { "474946383761", ("gif", "image/gif") },
+        { "474946383961", ("gif", "image/gif") },
+        // DOCX/XLSX/PPTX (são ZIPs)
+        // Word DOC
+        { "D0CF11E0A1B11AE1", ("doc", "application/msword") },
+        // XML
+        { "3C3F786D6C", ("xml", "application/xml") },
+    };
+    
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
     private const int REQUEST_TIMEOUT_MS = 600000; // 10 minutos para arquivos grandes
 
@@ -180,24 +207,64 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Identifica a extensão do arquivo usando magic bytes (fallback manual).
+    /// </summary>
+    private (string extension, string mimeType) IdentifyFileTypeByMagicBytes(byte[] headerBytes)
+    {
+        if (headerBytes == null || headerBytes.Length < 4)
+            return ("", "application/octet-stream");
+            
+        var hex = BitConverter.ToString(headerBytes).Replace("-", "").ToUpperInvariant();
+        Console.WriteLine($"[MagicBytes] Primeiros bytes (hex): {hex.Substring(0, Math.Min(20, hex.Length))}...");
+        
+        foreach (var (signature, result) in MagicBytesMap)
+        {
+            if (hex.StartsWith(signature))
+            {
+                Console.WriteLine($"[MagicBytes] Tipo identificado: {result.mimeType}, extensão: .{result.extension}");
+                return result;
+            }
+        }
+        
+        Console.WriteLine("[MagicBytes] Tipo não identificado pelos magic bytes");
+        return ("", "application/octet-stream");
+    }
+
+    /// <summary>
     /// Identifica a extensão do arquivo usando MagicBytesValidator a partir de um arquivo.
-    /// Lê apenas os primeiros bytes necessários para identificação.
+    /// Se não conseguir, usa fallback manual.
     /// </summary>
     private async Task<(string extension, string mimeType)> IdentifyFileTypeFromFileAsync(string filePath, CancellationToken cancellationToken = default)
     {
         try
         {
-            using var stream = File.OpenRead(filePath);
-            var fileType = await _fileTypeProvider.TryFindUnambiguousAsync(stream, cancellationToken);
-            
-            if (fileType != null)
+            // Primeiro tenta com MagicBytesValidator
+            using (var stream = File.OpenRead(filePath))
             {
-                var extension = fileType.Extensions.FirstOrDefault() ?? "";
-                var mimeType = fileType.MimeTypes.FirstOrDefault() ?? "application/octet-stream";
+                var fileType = await _fileTypeProvider.TryFindUnambiguousAsync(stream, cancellationToken);
                 
-                Console.WriteLine($"[MagicBytes] Tipo identificado: {mimeType}, extensão: .{extension}");
-                return (extension, mimeType);
+                if (fileType != null)
+                {
+                    var extension = fileType.Extensions.FirstOrDefault() ?? "";
+                    var mimeType = fileType.MimeTypes.FirstOrDefault() ?? "application/octet-stream";
+                    
+                    if (!string.IsNullOrEmpty(extension))
+                    {
+                        Console.WriteLine($"[MagicBytes] Tipo identificado via MagicBytesValidator: {mimeType}, extensão: .{extension}");
+                        return (extension, mimeType);
+                    }
+                }
             }
+            
+            // Fallback: lê os primeiros bytes e identifica manualmente
+            Console.WriteLine("[MagicBytes] MagicBytesValidator não identificou, tentando fallback manual...");
+            var headerBytes = new byte[16];
+            using (var stream = File.OpenRead(filePath))
+            {
+                await stream.ReadAsync(headerBytes, 0, headerBytes.Length, cancellationToken);
+            }
+            
+            return IdentifyFileTypeByMagicBytes(headerBytes);
         }
         catch (Exception ex)
         {
@@ -326,10 +393,14 @@ public class CampinasApiService : IAsyncDisposable
             
             // Usa o nome fornecido e adiciona extensão se necessário
             var finalFileName = fileName;
+            Console.WriteLine($"[CampinasApi] Nome antes de adicionar extensão: {finalFileName}");
+            Console.WriteLine($"[CampinasApi] HasValidExtension: {HasValidExtension(finalFileName)}");
+            Console.WriteLine($"[CampinasApi] Extensão detectada: {detectedExtension}");
+            
             if (!HasValidExtension(finalFileName) && !string.IsNullOrEmpty(detectedExtension))
             {
                 finalFileName += $".{detectedExtension}";
-                Console.WriteLine($"[CampinasApi] Extensão adicionada via magic bytes: .{detectedExtension}");
+                Console.WriteLine($"[CampinasApi] Extensão adicionada: .{detectedExtension}");
             }
             
             // Lê o arquivo do disco

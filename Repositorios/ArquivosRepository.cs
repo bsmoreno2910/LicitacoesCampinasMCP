@@ -30,4 +30,12 @@ public class ArquivosRepository
     {
         return await _apiService.DownloadArquivoEmpenhoAsync(compraId, empenhoId, arquivoId, cancellationToken);
     }
+
+    /// <summary>
+    /// Faz download direto do PDF de um empenho.
+    /// </summary>
+    public async Task<ArquivoDownload> DownloadEmpenhoAsync(string compraId, string empenhoId, CancellationToken cancellationToken = default)
+    {
+        return await _apiService.DownloadEmpenhoAsync(compraId, empenhoId, cancellationToken);
+    }
 }

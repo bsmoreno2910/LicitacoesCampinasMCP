@@ -242,6 +242,61 @@ public class CampinasApiService : IAsyncDisposable
         };
     }
 
+    /// <summary>
+    /// Faz download direto do PDF de um empenho da API de Campinas via Browserless.
+    /// O endpoint /compras/{compraId}/empenhos/{empenhoId} retorna diretamente o arquivo PDF.
+    /// </summary>
+    public async Task<ArquivoDownload> DownloadEmpenhoAsync(string compraId, string empenhoId, CancellationToken cancellationToken = default)
+    {
+        var apiContext = await GetApiContextAsync(cancellationToken);
+        
+        var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}";
+        Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO DIRETO {endpoint} (via Browserless)");
+        
+        var response = await apiContext.GetAsync(endpoint);
+        
+        // Se a chave expirou, tenta renovar
+        if (!response.Ok && (response.Status == 401 || response.Status == 403))
+        {
+            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+            _apiKeyService.InvalidateApiKey();
+            
+            _currentApiKey = null;
+            apiContext = await GetApiContextAsync(cancellationToken);
+            response = await apiContext.GetAsync(endpoint);
+        }
+
+        if (!response.Ok)
+        {
+            var errorBody = await response.TextAsync();
+            throw new Exception($"Erro ao baixar empenho: {response.Status} - {errorBody}");
+        }
+
+        var bytes = await response.BodyAsync();
+        var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/pdf";
+        
+        // Tenta extrair nome do arquivo do header content-disposition
+        var fileName = $"empenho_{empenhoId}.pdf";
+        if (response.Headers.TryGetValue("content-disposition", out var cd))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(cd, "filename[^;=\\n]*=(['\"]?)([^'\"\\n]*)");
+            if (match.Success) fileName = match.Groups[2].Value;
+        }
+        
+        // Adiciona extensão .pdf se não tiver
+        if (!fileName.Contains("."))
+        {
+            fileName += ".pdf";
+        }
+
+        return new ArquivoDownload
+        {
+            Bytes = bytes,
+            ContentType = contentType,
+            FileName = fileName
+        };
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _contextLock.WaitAsync();

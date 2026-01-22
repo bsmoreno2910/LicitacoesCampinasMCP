@@ -6,19 +6,15 @@ namespace LicitacoesCampinasMCP.Servicos;
 
 /// <summary>
 /// Serviço responsável por fazer requisições à API de contratações de Campinas.
-/// Utiliza o BrowserPoolService para todas as operações com Playwright.
+/// Cada requisição usa uma sessão dedicada do pool, que é devolvida após o uso.
 /// </summary>
 public class CampinasApiService : IAsyncDisposable
 {
     private readonly BrowserPoolService _browserPool;
     private readonly ApiKeyService _apiKeyService;
-    private readonly SemaphoreSlim _contextLock = new(1, 1);
-    
-    private BrowserSession? _dedicatedSession;
-    private IAPIRequestContext? _sharedApiContext;
-    private string? _currentApiKey;
     
     private const string BASE_URL = "https://contratacoes-api.campinas.sp.gov.br";
+    private const int REQUEST_TIMEOUT_MS = 300000; // 5 minutos
 
     public CampinasApiService(BrowserPoolService browserPool, ApiKeyService apiKeyService)
     {
@@ -27,155 +23,169 @@ public class CampinasApiService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Obtém ou cria um contexto de API com a chave atual usando o BrowserPoolService.
+    /// Cria um contexto de API com a chave atual usando uma sessão do pool.
     /// </summary>
-    private async Task<IAPIRequestContext> GetApiContextAsync(CancellationToken cancellationToken = default)
+    private async Task<IAPIRequestContext> CreateApiContextAsync(BrowserSession session, CancellationToken cancellationToken = default)
     {
         var apiKey = await _apiKeyService.GetApiKeyAsync(cancellationToken);
         
-        await _contextLock.WaitAsync(cancellationToken);
-        try
+        Console.WriteLine("[CampinasApi] Criando contexto de API via Browserless...");
+        return await session.Playwright.APIRequest.NewContextAsync(new APIRequestNewContextOptions
         {
-            // Se a chave mudou ou não temos sessão, recria o contexto
-            if (_sharedApiContext == null || _currentApiKey != apiKey || _dedicatedSession == null || !await _dedicatedSession.IsValidAsync())
+            BaseURL = BASE_URL,
+            Timeout = REQUEST_TIMEOUT_MS,
+            ExtraHTTPHeaders = new Dictionary<string, string>
             {
-                // Libera sessão anterior se existir
-                if (_dedicatedSession != null)
-                {
-                    if (_sharedApiContext != null)
-                    {
-                        await _sharedApiContext.DisposeAsync();
-                        _sharedApiContext = null;
-                    }
-                    await _browserPool.ReleaseSessionAsync(_dedicatedSession);
-                    _dedicatedSession = null;
-                }
-
-                // Adquire nova sessão do pool
-                Console.WriteLine("[CampinasApi] Adquirindo sessão do BrowserPool...");
-                _dedicatedSession = await _browserPool.AcquireSessionAsync(cancellationToken);
-
-                // Cria contexto de API usando o Playwright da sessão
-                Console.WriteLine("[CampinasApi] Criando contexto de API via Browserless...");
-                _sharedApiContext = await _dedicatedSession.Playwright.APIRequest.NewContextAsync(new APIRequestNewContextOptions
-                {
-                    BaseURL = BASE_URL,
-                    Timeout = 300000, // 5 minutos de timeout para requisições
-                    ExtraHTTPHeaders = new Dictionary<string, string>
-                    {
-                        ["x-api-key"] = apiKey,
-                        ["Accept"] = "application/json",
-                        ["Content-Type"] = "application/json",
-                        ["Origin"] = "https://campinas.sp.gov.br"
-                    }
-                });
-                
-                _currentApiKey = apiKey;
+                ["x-api-key"] = apiKey,
+                ["Accept"] = "application/json",
+                ["Content-Type"] = "application/json",
+                ["Origin"] = "https://campinas.sp.gov.br"
             }
-
-            return _sharedApiContext!;
-        }
-        finally
-        {
-            _contextLock.Release();
-        }
+        });
     }
 
     /// <summary>
     /// Faz uma requisição GET à API de Campinas via Browserless.
+    /// Usa uma sessão dedicada do pool para cada requisição.
     /// </summary>
     public async Task<JsonDocument?> GetAsync(string endpoint, CancellationToken cancellationToken = default)
     {
-        var apiContext = await GetApiContextAsync(cancellationToken);
+        BrowserSession? session = null;
+        IAPIRequestContext? apiContext = null;
         
-        Console.WriteLine($"[CampinasApi] GET {endpoint} (via Browserless)");
-        var response = await apiContext.GetAsync(endpoint);
-        
-        // Se a chave expirou, tenta renovar
-        if (!response.Ok && (response.Status == 401 || response.Status == 403))
+        try
         {
-            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
-            _apiKeyService.InvalidateApiKey();
+            // Adquire uma sessão do pool
+            Console.WriteLine("[CampinasApi] Adquirindo sessão do BrowserPool...");
+            session = await _browserPool.AcquireSessionAsync(cancellationToken);
             
-            // Força recriação do contexto
-            _currentApiKey = null;
-            apiContext = await GetApiContextAsync(cancellationToken);
-            response = await apiContext.GetAsync(endpoint);
-        }
+            // Cria contexto de API para esta requisição
+            apiContext = await CreateApiContextAsync(session, cancellationToken);
+            
+            Console.WriteLine($"[CampinasApi] GET {endpoint} (via Browserless)");
+            var response = await apiContext.GetAsync(endpoint);
+            
+            // Se a chave expirou, tenta renovar
+            if (!response.Ok && (response.Status == 401 || response.Status == 403))
+            {
+                Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+                _apiKeyService.InvalidateApiKey();
+                
+                // Recria o contexto com a nova chave
+                await apiContext.DisposeAsync();
+                apiContext = await CreateApiContextAsync(session, cancellationToken);
+                response = await apiContext.GetAsync(endpoint);
+            }
 
-        if (!response.Ok)
+            if (!response.Ok)
+            {
+                var errorBody = await response.TextAsync();
+                throw new Exception($"Erro na API: {response.Status} - {errorBody}");
+            }
+
+            var json = await response.TextAsync();
+            return JsonDocument.Parse(json);
+        }
+        finally
         {
-            var errorBody = await response.TextAsync();
-            throw new Exception($"Erro na API: {response.Status} - {errorBody}");
+            // Sempre libera os recursos
+            if (apiContext != null)
+            {
+                await apiContext.DisposeAsync();
+            }
+            if (session != null)
+            {
+                await _browserPool.ReleaseSessionAsync(session);
+            }
         }
-
-        var json = await response.TextAsync();
-        return JsonDocument.Parse(json);
     }
 
     /// <summary>
     /// Faz download de um arquivo da API de Campinas via Browserless.
+    /// Usa uma sessão dedicada do pool para cada download.
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoAsync(string compraId, string arquivoId, CancellationToken cancellationToken = default)
     {
-        var apiContext = await GetApiContextAsync(cancellationToken);
+        BrowserSession? session = null;
+        IAPIRequestContext? apiContext = null;
         
-        var endpoint = $"/compras/{compraId}/arquivos/{arquivoId}/blob";
-        Console.WriteLine($"[CampinasApi] DOWNLOAD {endpoint} (via Browserless)");
-        
-        var response = await apiContext.GetAsync(endpoint);
-        
-        // Se a chave expirou, tenta renovar
-        if (!response.Ok && (response.Status == 401 || response.Status == 403))
+        try
         {
-            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
-            _apiKeyService.InvalidateApiKey();
+            // Adquire uma sessão do pool
+            Console.WriteLine("[CampinasApi] Adquirindo sessão do BrowserPool para download...");
+            session = await _browserPool.AcquireSessionAsync(cancellationToken);
             
-            _currentApiKey = null;
-            apiContext = await GetApiContextAsync(cancellationToken);
-            response = await apiContext.GetAsync(endpoint);
-        }
-
-        if (!response.Ok)
-        {
-            var errorBody = await response.TextAsync();
-            throw new Exception($"Erro ao baixar arquivo: {response.Status} - {errorBody}");
-        }
-
-        var bytes = await response.BodyAsync();
-        var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
-        
-        // Tenta extrair nome do arquivo do header content-disposition
-        var fileName = $"arquivo_{arquivoId}";
-        if (response.Headers.TryGetValue("content-disposition", out var cd))
-        {
-            var match = System.Text.RegularExpressions.Regex.Match(cd, "filename[^;=\\n]*=(['\"]?)([^'\"\\n]*)");
-            if (match.Success) fileName = match.Groups[2].Value;
-        }
-        
-        // Adiciona extensão baseada no content-type se não tiver
-        if (!fileName.Contains("."))
-        {
-            fileName += contentType switch
+            // Cria contexto de API para este download
+            apiContext = await CreateApiContextAsync(session, cancellationToken);
+            
+            var endpoint = $"/compras/{compraId}/arquivos/{arquivoId}/blob";
+            Console.WriteLine($"[CampinasApi] DOWNLOAD {endpoint} (via Browserless)");
+            
+            var response = await apiContext.GetAsync(endpoint);
+            
+            // Se a chave expirou, tenta renovar
+            if (!response.Ok && (response.Status == 401 || response.Status == 403))
             {
-                "application/pdf" => ".pdf",
-                "image/jpeg" => ".jpg",
-                "image/png" => ".png",
-                "application/zip" => ".zip",
-                "application/msword" => ".doc",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
-                "application/vnd.ms-excel" => ".xls",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
-                _ => ""
+                Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+                _apiKeyService.InvalidateApiKey();
+                
+                await apiContext.DisposeAsync();
+                apiContext = await CreateApiContextAsync(session, cancellationToken);
+                response = await apiContext.GetAsync(endpoint);
+            }
+
+            if (!response.Ok)
+            {
+                var errorBody = await response.TextAsync();
+                throw new Exception($"Erro ao baixar arquivo: {response.Status} - {errorBody}");
+            }
+
+            var bytes = await response.BodyAsync();
+            var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
+            
+            // Tenta extrair nome do arquivo do header content-disposition
+            var fileName = $"arquivo_{arquivoId}";
+            if (response.Headers.TryGetValue("content-disposition", out var cd))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(cd, @"filename\*?=['""]?(?:UTF-8'')?([^'"";\n]+)");
+                if (match.Success) fileName = Uri.UnescapeDataString(match.Groups[1].Value);
+            }
+            
+            // Adiciona extensão baseada no content-type se não tiver
+            if (!fileName.Contains("."))
+            {
+                fileName += contentType switch
+                {
+                    "application/pdf" => ".pdf",
+                    "image/jpeg" => ".jpg",
+                    "image/png" => ".png",
+                    "application/zip" => ".zip",
+                    "application/msword" => ".doc",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+                    "application/vnd.ms-excel" => ".xls",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+                    _ => ""
+                };
+            }
+
+            return new ArquivoDownload
+            {
+                Bytes = bytes,
+                ContentType = contentType,
+                FileName = fileName
             };
         }
-
-        return new ArquivoDownload
+        finally
         {
-            Bytes = bytes,
-            ContentType = contentType,
-            FileName = fileName
-        };
+            if (apiContext != null)
+            {
+                await apiContext.DisposeAsync();
+            }
+            if (session != null)
+            {
+                await _browserPool.ReleaseSessionAsync(session);
+            }
+        }
     }
 
     /// <summary>
@@ -183,64 +193,75 @@ public class CampinasApiService : IAsyncDisposable
     /// </summary>
     public async Task<ArquivoDownload> DownloadArquivoEmpenhoAsync(string compraId, string empenhoId, string arquivoId, CancellationToken cancellationToken = default)
     {
-        var apiContext = await GetApiContextAsync(cancellationToken);
+        BrowserSession? session = null;
+        IAPIRequestContext? apiContext = null;
         
-        var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}/arquivos/{arquivoId}/blob";
-        Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO {endpoint} (via Browserless)");
-        
-        var response = await apiContext.GetAsync(endpoint);
-        
-        // Se a chave expirou, tenta renovar
-        if (!response.Ok && (response.Status == 401 || response.Status == 403))
+        try
         {
-            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
-            _apiKeyService.InvalidateApiKey();
+            session = await _browserPool.AcquireSessionAsync(cancellationToken);
+            apiContext = await CreateApiContextAsync(session, cancellationToken);
             
-            _currentApiKey = null;
-            apiContext = await GetApiContextAsync(cancellationToken);
-            response = await apiContext.GetAsync(endpoint);
-        }
-
-        if (!response.Ok)
-        {
-            var errorBody = await response.TextAsync();
-            throw new Exception($"Erro ao baixar arquivo de empenho: {response.Status} - {errorBody}");
-        }
-
-        var bytes = await response.BodyAsync();
-        var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
-        
-        // Tenta extrair nome do arquivo do header content-disposition
-        var fileName = $"empenho_{empenhoId}_arquivo_{arquivoId}";
-        if (response.Headers.TryGetValue("content-disposition", out var cd))
-        {
-            var match = System.Text.RegularExpressions.Regex.Match(cd, "filename[^;=\\n]*=(['\"]?)([^'\"\\n]*)");
-            if (match.Success) fileName = match.Groups[2].Value;
-        }
-        
-        // Adiciona extensão baseada no content-type se não tiver
-        if (!fileName.Contains("."))
-        {
-            fileName += contentType switch
+            var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}/arquivos/{arquivoId}/blob";
+            Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO {endpoint} (via Browserless)");
+            
+            var response = await apiContext.GetAsync(endpoint);
+            
+            if (!response.Ok && (response.Status == 401 || response.Status == 403))
             {
-                "application/pdf" => ".pdf",
-                "image/jpeg" => ".jpg",
-                "image/png" => ".png",
-                "application/zip" => ".zip",
-                "application/msword" => ".doc",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
-                "application/vnd.ms-excel" => ".xls",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
-                _ => ""
+                Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+                _apiKeyService.InvalidateApiKey();
+                
+                await apiContext.DisposeAsync();
+                apiContext = await CreateApiContextAsync(session, cancellationToken);
+                response = await apiContext.GetAsync(endpoint);
+            }
+
+            if (!response.Ok)
+            {
+                var errorBody = await response.TextAsync();
+                throw new Exception($"Erro ao baixar arquivo de empenho: {response.Status} - {errorBody}");
+            }
+
+            var bytes = await response.BodyAsync();
+            var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/octet-stream";
+            
+            var fileName = $"empenho_{empenhoId}_arquivo_{arquivoId}";
+            if (response.Headers.TryGetValue("content-disposition", out var cd))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(cd, @"filename\*?=['""]?(?:UTF-8'')?([^'"";\n]+)");
+                if (match.Success) fileName = Uri.UnescapeDataString(match.Groups[1].Value);
+            }
+            
+            if (!fileName.Contains("."))
+            {
+                fileName += contentType switch
+                {
+                    "application/pdf" => ".pdf",
+                    "image/jpeg" => ".jpg",
+                    "image/png" => ".png",
+                    "application/zip" => ".zip",
+                    _ => ""
+                };
+            }
+
+            return new ArquivoDownload
+            {
+                Bytes = bytes,
+                ContentType = contentType,
+                FileName = fileName
             };
         }
-
-        return new ArquivoDownload
+        finally
         {
-            Bytes = bytes,
-            ContentType = contentType,
-            FileName = fileName
-        };
+            if (apiContext != null)
+            {
+                await apiContext.DisposeAsync();
+            }
+            if (session != null)
+            {
+                await _browserPool.ReleaseSessionAsync(session);
+            }
+        }
     }
 
     /// <summary>
@@ -249,76 +270,74 @@ public class CampinasApiService : IAsyncDisposable
     /// </summary>
     public async Task<ArquivoDownload> DownloadEmpenhoAsync(string compraId, string empenhoId, CancellationToken cancellationToken = default)
     {
-        var apiContext = await GetApiContextAsync(cancellationToken);
+        BrowserSession? session = null;
+        IAPIRequestContext? apiContext = null;
         
-        var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}";
-        Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO DIRETO {endpoint} (via Browserless)");
-        
-        var response = await apiContext.GetAsync(endpoint);
-        
-        // Se a chave expirou, tenta renovar
-        if (!response.Ok && (response.Status == 401 || response.Status == 403))
-        {
-            Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
-            _apiKeyService.InvalidateApiKey();
-            
-            _currentApiKey = null;
-            apiContext = await GetApiContextAsync(cancellationToken);
-            response = await apiContext.GetAsync(endpoint);
-        }
-
-        if (!response.Ok)
-        {
-            var errorBody = await response.TextAsync();
-            throw new Exception($"Erro ao baixar empenho: {response.Status} - {errorBody}");
-        }
-
-        var bytes = await response.BodyAsync();
-        var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/pdf";
-        
-        // Tenta extrair nome do arquivo do header content-disposition
-        var fileName = $"empenho_{empenhoId}.pdf";
-        if (response.Headers.TryGetValue("content-disposition", out var cd))
-        {
-            var match = System.Text.RegularExpressions.Regex.Match(cd, "filename[^;=\\n]*=(['\"]?)([^'\"\\n]*)");
-            if (match.Success) fileName = match.Groups[2].Value;
-        }
-        
-        // Adiciona extensão .pdf se não tiver
-        if (!fileName.Contains("."))
-        {
-            fileName += ".pdf";
-        }
-
-        return new ArquivoDownload
-        {
-            Bytes = bytes,
-            ContentType = contentType,
-            FileName = fileName
-        };
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        await _contextLock.WaitAsync();
         try
         {
-            if (_sharedApiContext != null)
+            session = await _browserPool.AcquireSessionAsync(cancellationToken);
+            apiContext = await CreateApiContextAsync(session, cancellationToken);
+            
+            var endpoint = $"/compras/{compraId}/empenhos/{empenhoId}";
+            Console.WriteLine($"[CampinasApi] DOWNLOAD EMPENHO DIRETO {endpoint} (via Browserless)");
+            
+            var response = await apiContext.GetAsync(endpoint);
+            
+            if (!response.Ok && (response.Status == 401 || response.Status == 403))
             {
-                await _sharedApiContext.DisposeAsync();
-                _sharedApiContext = null;
+                Console.WriteLine("[CampinasApi] API Key expirada, renovando...");
+                _apiKeyService.InvalidateApiKey();
+                
+                await apiContext.DisposeAsync();
+                apiContext = await CreateApiContextAsync(session, cancellationToken);
+                response = await apiContext.GetAsync(endpoint);
+            }
+
+            if (!response.Ok)
+            {
+                var errorBody = await response.TextAsync();
+                throw new Exception($"Erro ao baixar empenho: {response.Status} - {errorBody}");
+            }
+
+            var bytes = await response.BodyAsync();
+            var contentType = response.Headers.TryGetValue("content-type", out var ct) ? ct : "application/pdf";
+            
+            var fileName = $"empenho_{empenhoId}.pdf";
+            if (response.Headers.TryGetValue("content-disposition", out var cd))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(cd, @"filename\*?=['""]?(?:UTF-8'')?([^'"";\n]+)");
+                if (match.Success) fileName = Uri.UnescapeDataString(match.Groups[1].Value);
             }
             
-            if (_dedicatedSession != null)
+            if (!fileName.Contains("."))
             {
-                await _browserPool.ReleaseSessionAsync(_dedicatedSession);
-                _dedicatedSession = null;
+                fileName += ".pdf";
             }
+
+            return new ArquivoDownload
+            {
+                Bytes = bytes,
+                ContentType = contentType,
+                FileName = fileName
+            };
         }
         finally
         {
-            _contextLock.Release();
-            _contextLock.Dispose();
+            if (apiContext != null)
+            {
+                await apiContext.DisposeAsync();
+            }
+            if (session != null)
+            {
+                await _browserPool.ReleaseSessionAsync(session);
+            }
         }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        // Não há mais recursos compartilhados para liberar
+        // Cada requisição gerencia sua própria sessão
+        return ValueTask.CompletedTask;
     }
 }

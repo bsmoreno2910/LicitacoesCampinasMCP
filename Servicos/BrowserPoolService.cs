@@ -18,10 +18,15 @@ public class BrowserPoolService : IAsyncDisposable
     private bool _initialized;
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
-    public BrowserPoolService(int maxConnections = 20, string? browserlessUrl = null)
+    // Timeout padrão de 5 minutos (300000ms) para sessões do Browserless
+    private const int DEFAULT_SESSION_TIMEOUT_MS = 300000;
+    
+    public BrowserPoolService(int maxConnections = 20, string? browserlessUrl = null, int sessionTimeoutMs = DEFAULT_SESSION_TIMEOUT_MS)
     {
         _maxConnections = maxConnections;
-        _browserlessUrl = browserlessUrl ?? "wss://browserless.vtc.dev.br/?token=78e69a4812450ad4e2e657ee2cdf90b5";
+        // Adiciona timeout na URL do Browserless para manter a sessão aberta por mais tempo
+        var baseUrl = browserlessUrl ?? "wss://browserless.vtc.dev.br/?token=78e69a4812450ad4e2e657ee2cdf90b5";
+        _browserlessUrl = baseUrl.Contains("timeout=") ? baseUrl : $"{baseUrl}&timeout={sessionTimeoutMs}";
         _poolSemaphore = new SemaphoreSlim(maxConnections, maxConnections);
         _availableSessions = new ConcurrentBag<BrowserSession>();
         _activeSessions = new ConcurrentDictionary<Guid, BrowserSession>();
@@ -133,7 +138,7 @@ public class BrowserPoolService : IAsyncDisposable
 
         var browser = await _playwright.Chromium.ConnectOverCDPAsync(_browserlessUrl, new BrowserTypeConnectOverCDPOptions
         {
-            Timeout = 60000
+            Timeout = 300000 // 5 minutos de timeout para conexão
         });
 
         return new BrowserSession(browser, _playwright);

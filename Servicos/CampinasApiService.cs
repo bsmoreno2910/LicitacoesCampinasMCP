@@ -60,6 +60,7 @@ public class CampinasApiService : IAsyncDisposable
                 _sharedApiContext = await _dedicatedSession.Playwright.APIRequest.NewContextAsync(new APIRequestNewContextOptions
                 {
                     BaseURL = BASE_URL,
+                    Timeout = 300000, // 5 minutos de timeout para requisições
                     ExtraHTTPHeaders = new Dictionary<string, string>
                     {
                         ["x-api-key"] = apiKey,

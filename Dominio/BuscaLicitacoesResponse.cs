@@ -4,6 +4,7 @@ namespace LicitacoesCampinasMCP.Dominio;
 
 /// <summary>
 /// Representa a resposta de busca de licitações por filtro.
+/// Retorna dados completos de cada licitação (como a busca por ID).
 /// </summary>
 public class BuscaLicitacoesResponse
 {
@@ -14,7 +15,7 @@ public class BuscaLicitacoesResponse
     public int Total { get; set; }
     
     [JsonPropertyName("licitacoes")] 
-    public List<LicitacaoResumo> Licitacoes { get; set; } = new();
+    public List<LicitacaoData> Licitacoes { get; set; } = new();
 }
 
 /// <summary>

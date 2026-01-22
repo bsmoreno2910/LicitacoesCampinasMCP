@@ -360,6 +360,7 @@ public class LicitacoesRepository
 
     /// <summary>
     /// Busca licitações por filtro (processo ou objeto).
+    /// Retorna dados completos de cada licitação (como a busca por ID).
     /// </summary>
     public async Task<BuscaLicitacoesResponse> BuscarPorFiltroAsync(string? processo = null, string? objeto = null, CancellationToken cancellationToken = default)
     {
@@ -383,7 +384,7 @@ public class LicitacoesRepository
         
         var queryString = string.Join("&", filtros);
         var doc = await _apiService.GetAsync(
-            $"/compras?{queryString}&page[number]=1&page[size]=100&sort=-id&include=unidade,modalidade,situacao_compra,amparo_legal,instrumento_convocatorio,modo_disputa",
+            $"/compras?{queryString}&page[number]=1&page[size]=100&sort=-id",
             cancellationToken);
         
         if (doc == null)
@@ -391,11 +392,13 @@ public class LicitacoesRepository
 
         var root = doc.RootElement;
         
+        // Coleta os IDs encontrados
+        var ids = new List<int>();
         if (root.TryGetProperty("data", out var data))
         {
             foreach (var item in data.EnumerateArray())
             {
-                response.Licitacoes.Add(MapLicitacaoResumo(item));
+                ids.Add(JsonHelper.GetInt(item, "id"));
             }
         }
 
@@ -404,6 +407,16 @@ public class LicitacoesRepository
             response.Total = JsonHelper.GetInt(meta, "total_count");
         }
 
+        // Busca os dados completos de cada licitação
+        foreach (var id in ids)
+        {
+            var licitacao = await BuscarPorIdAsync(id.ToString(), cancellationToken);
+            if (licitacao != null)
+            {
+                response.Licitacoes.Add(licitacao);
+            }
+        }
+
         return response;
     }
-}
+

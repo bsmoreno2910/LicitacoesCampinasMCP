@@ -9,15 +9,18 @@ namespace LicitacoesCampinasMCP.Servicos;
 public static class JsonHelper
 {
     /// <summary>
-    /// Obtém uma string de um JsonElement.
+    /// Obtém uma string de um JsonElement, aplicando Trim para remover espaços.
     /// </summary>
     public static string? GetString(JsonElement el, string prop)
     {
         try 
         { 
-            return el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null 
-                ? v.GetString() 
-                : null; 
+            if (el.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null)
+            {
+                var str = v.GetString();
+                return string.IsNullOrWhiteSpace(str) ? null : str.Trim();
+            }
+            return null; 
         }
         catch { return null; }
     }

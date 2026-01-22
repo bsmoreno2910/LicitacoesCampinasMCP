@@ -317,13 +317,15 @@ public class LicitacoesRepository
     {
         try
         {
+            // Inicializa a lista de arquivos se ainda não existir
+            licitacao.Arquivos ??= new List<ArquivoData>();
+            
             var arqsDoc = await _apiService.GetAsync(
                 $"/compras/{editalId}/arquivos?filter[acao][neq]=remover&sort=pncp_titulo_documento&page[number]=1&page[size]=1000",
                 cancellationToken);
             
             if (arqsDoc != null && arqsDoc.RootElement.TryGetProperty("data", out var arqsData))
             {
-                licitacao.Arquivos = new List<ArquivoData>();
                 foreach (var arq in arqsData.EnumerateArray())
                 {
                     var arquivoId = JsonHelper.GetInt(arq, "id");
@@ -335,8 +337,17 @@ public class LicitacoesRepository
                         Id = arquivoId,
                         TipoDocumento = JsonHelper.GetInt(arq, "pncp_tipo_documento"),
                         Titulo = JsonHelper.GetString(arq, "pncp_titulo_documento"),
+                        Nome = JsonHelper.GetString(arq, "pncp_titulo_documento"),
+                        Descricao = JsonHelper.GetString(arq, "pncp_titulo_documento"),
+                        Tipo = JsonHelper.GetString(arq, "tipo"),
+                        Tamanho = JsonHelper.GetNullableLong(arq, "tamanho"),
+                        DownloadUrl = linkDownload,
                         LinkPncp = linkDownload,
-                        CreatedAt = JsonHelper.GetString(arq, "created_at")
+                        CreatedAt = JsonHelper.GetString(arq, "created_at"),
+                        UpdatedAt = JsonHelper.GetString(arq, "updated_at"),
+                        Origem = "licitacao",
+                        EmpenhoId = null,
+                        NumeroEmpenho = null
                     });
                 }
             }
@@ -447,12 +458,15 @@ public class LicitacoesRepository
     }
 
     /// <summary>
-    /// Busca os empenhos de uma licitação.
+    /// Busca os empenhos de uma licitação e adiciona seus arquivos ao array principal.
     /// </summary>
     private async Task BuscarEmpenhosAsync(LicitacaoData licitacao, string editalId, CancellationToken cancellationToken)
     {
         try
         {
+            // Inicializa a lista de arquivos se ainda não existir
+            licitacao.Arquivos ??= new List<ArquivoData>();
+            
             var empDoc = await _apiService.GetAsync(
                 $"/compras/{editalId}/empenhos?page[number]=1&page[size]=1000",
                 cancellationToken);
@@ -463,12 +477,14 @@ public class LicitacoesRepository
                 foreach (var emp in empData.EnumerateArray())
                 {
                     var empenhoId = JsonHelper.GetInt(emp, "id");
+                    var numeroEmpenho = JsonHelper.GetString(emp, "numero_empenho");
+                    
                     var empenho = new EmpenhoData
                     {
                         Id = empenhoId,
                         Ano = JsonHelper.GetNullableInt(emp, "ano"),
                         Data = JsonHelper.GetString(emp, "data"),
-                        NumeroEmpenho = JsonHelper.GetString(emp, "numero_empenho"),
+                        NumeroEmpenho = numeroEmpenho,
                         CpfCnpjFornecedor = JsonHelper.GetString(emp, "cpf_cnpj_fornecedor"),
                         Fornecedor = JsonHelper.GetString(emp, "fornecedor"),
                         ValorGlobal = JsonHelper.GetNullableDecimal(emp, "valor_global"),
@@ -478,8 +494,8 @@ public class LicitacoesRepository
                         UpdatedAt = JsonHelper.GetString(emp, "updated_at")
                     };
 
-                    // Busca arquivos do empenho
-                    await BuscarArquivosEmpenhoAsync(empenho, editalId, empenhoId.ToString(), cancellationToken);
+                    // Busca arquivos do empenho e adiciona ao array principal de arquivos
+                    await BuscarArquivosEmpenhoAsync(licitacao, empenho, editalId, empenhoId.ToString(), numeroEmpenho, cancellationToken);
 
                     licitacao.Empenhos.Add(empenho);
                 }
@@ -492,9 +508,9 @@ public class LicitacoesRepository
     }
 
     /// <summary>
-    /// Busca os arquivos de um empenho específico.
+    /// Busca os arquivos de um empenho e adiciona ao array principal de arquivos da licitação.
     /// </summary>
-    private async Task BuscarArquivosEmpenhoAsync(EmpenhoData empenho, string compraId, string empenhoId, CancellationToken cancellationToken)
+    private async Task BuscarArquivosEmpenhoAsync(LicitacaoData licitacao, EmpenhoData empenho, string compraId, string empenhoId, string? numeroEmpenho, CancellationToken cancellationToken)
     {
         try
         {
@@ -508,20 +524,47 @@ public class LicitacoesRepository
                 foreach (var arq in arqData.EnumerateArray())
                 {
                     var arquivoId = JsonHelper.GetInt(arq, "id");
+                    var nome = JsonHelper.GetString(arq, "nome");
+                    var descricao = JsonHelper.GetString(arq, "descricao");
+                    var tipo = JsonHelper.GetString(arq, "tipo");
+                    var tamanho = JsonHelper.GetNullableLong(arq, "tamanho");
+                    var createdAt = JsonHelper.GetString(arq, "created_at");
+                    var updatedAt = JsonHelper.GetString(arq, "updated_at");
+                    
                     // Gera o link de download através da nossa API
                     var linkDownload = $"{API_BASE_URL}/api/compra/{compraId}/empenho/{empenhoId}/arquivo/{arquivoId}/download";
                     
+                    // Adiciona ao array de arquivos do empenho (para manter compatibilidade)
                     empenho.Arquivos.Add(new EmpenhoArquivoData
                     {
                         Id = arquivoId,
-                        Nome = JsonHelper.GetString(arq, "nome"),
-                        Descricao = JsonHelper.GetString(arq, "descricao"),
-                        Tipo = JsonHelper.GetString(arq, "tipo"),
-                        Tamanho = JsonHelper.GetNullableLong(arq, "tamanho"),
-                        EmpenhoId = JsonHelper.GetNullableInt(arq, "empenho_id"),
-                        CreatedAt = JsonHelper.GetString(arq, "created_at"),
-                        UpdatedAt = JsonHelper.GetString(arq, "updated_at"),
+                        Nome = nome,
+                        Descricao = descricao,
+                        Tipo = tipo,
+                        Tamanho = tamanho,
+                        EmpenhoId = empenho.Id,
+                        CreatedAt = createdAt,
+                        UpdatedAt = updatedAt,
                         DownloadUrl = linkDownload
+                    });
+                    
+                    // Adiciona ao array principal de arquivos da licitação
+                    licitacao.Arquivos.Add(new ArquivoData
+                    {
+                        Id = arquivoId,
+                        TipoDocumento = 0, // Empenho não tem tipo_documento
+                        Titulo = nome ?? descricao,
+                        Nome = nome,
+                        Descricao = descricao,
+                        Tipo = tipo,
+                        Tamanho = tamanho,
+                        DownloadUrl = linkDownload,
+                        LinkPncp = linkDownload,
+                        CreatedAt = createdAt,
+                        UpdatedAt = updatedAt,
+                        Origem = "empenho",
+                        EmpenhoId = empenho.Id,
+                        NumeroEmpenho = numeroEmpenho
                     });
                 }
             }
